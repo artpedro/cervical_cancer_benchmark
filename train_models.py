@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 import torch
 
-from datasets.datasets import NORM_STATS_PATH, scan_herlev, scan_riva, scan_sipakmed
+from datasets.datasets import NORM_STATS_PATH, scan_riva, scan_sipakmed
 from training.io_utils import env_path, setup_run_dir, tee_log
 from training.pipeline import scan_dataset, train_dataset_v2
 
@@ -33,7 +33,6 @@ PRINT_EVERY_EPOCH = 1
 USE_AMP = True
 
 DATASETS: list[tuple[str, Path, Callable]] = [
-    ("herlev", DATA_ROOT / "smear2005", scan_herlev),
     ("sipakmed", DATA_ROOT / "sipakmed", scan_sipakmed),
     ("riva", DATA_ROOT / "riva", scan_riva),
 ]
@@ -54,48 +53,81 @@ class ModelTrainConfig:
     max_params_m: float = 100.0
 
 
-MODEL_CONFIGS: list[ModelTrainConfig] = [
+SIPAKMED_MODEL_CONFIGS: list[ModelTrainConfig] = [
     ModelTrainConfig(
-        display_name="EfficientNet B0",
-        backbone_id="efficientnet_b0",
+        display_name="FastViT T8",
+        backbone_id="fastvit_t8",
         epochs=100,
         lr=1e-3,
         scheduler_milestones=[25, 50, 75],
         scheduler_gamma=0.5,
     ),
     ModelTrainConfig(
-        display_name="EfficientNet B1",
-        backbone_id="efficientnet_b1",
-        epochs=100,
-        lr=1e-3,
-        scheduler_milestones=[25, 50, 75],
-        scheduler_gamma=0.5,
-    ),
-    ModelTrainConfig(
-        display_name="EfficientNet B2",
-        backbone_id="efficientnet_b2",
-        epochs=100,
-        lr=1e-3,
-        scheduler_milestones=[25, 50, 75],
-        scheduler_gamma=0.5,
-    ),
-    ModelTrainConfig(
-        display_name="MobileNet V2",
-        backbone_id="mobilenetv2_100",
-        epochs=100,
-        lr=1e-3,
-        scheduler_milestones=[25, 50, 75],
-        scheduler_gamma=0.5,
-    ),
-    ModelTrainConfig(
-        display_name="MobileNet V4",
-        backbone_id="mobilenet_v4",
+        display_name="LeViT 128s",
+        backbone_id="levit_128s",
         epochs=100,
         lr=1e-3,
         scheduler_milestones=[25, 50, 75],
         scheduler_gamma=0.5,
     ),
 ]
+
+RIVA_MODEL_CONFIGS: list[ModelTrainConfig] = [
+    ModelTrainConfig(
+        display_name="EfficientFormerV2 S1",
+        backbone_id="efficientformerv2_s1",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+    ),
+    ModelTrainConfig(
+        display_name="EfficientFormerV2 S0",
+        backbone_id="efficientformerv2_s0",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+    ),
+    ModelTrainConfig(
+        display_name="EAT",
+        backbone_id="eat",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+        load_kwargs={"img_size": 224},
+    ),
+    ModelTrainConfig(
+        display_name="MobileViT v2 100",
+        backbone_id="mobilevitv2_100",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+    ),
+    ModelTrainConfig(
+        display_name="FastViT T8",
+        backbone_id="fastvit_t8",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+    ),
+    ModelTrainConfig(
+        display_name="LeViT 128s",
+        backbone_id="levit_128s",
+        epochs=100,
+        lr=1e-3,
+        scheduler_milestones=[25, 50, 75],
+        scheduler_gamma=0.5,
+    ),
+]
+
+MODEL_CONFIGS_BY_DATASET: dict[str, list[ModelTrainConfig]] = {
+    "sipakmed": SIPAKMED_MODEL_CONFIGS,
+    "riva": RIVA_MODEL_CONFIGS,
+}
 
 # =============================================================================
 # Runtime setup
@@ -119,7 +151,9 @@ def main() -> None:
     print(f"BALANCE_MODE: {BALANCE_MODE}")
     print(f"Datasets: {[d[0] for d in DATASETS]}")
     print(f"Data root: {DATA_ROOT.resolve()}")
-    print(f"Models: {[c.display_name for c in MODEL_CONFIGS]}")
+    for dataset_name, _, _ in DATASETS:
+        model_names = [c.display_name for c in MODEL_CONFIGS_BY_DATASET[dataset_name]]
+        print(f"Models for {dataset_name}: {model_names}")
     print("=" * 70 + "\n")
 
     missing_roots = [str(root) for _, root, _ in DATASETS if not root.exists()]
@@ -138,7 +172,9 @@ def main() -> None:
     log_path = RUNS_DIR / f"terminal_v2_{run_start_dt.strftime('%Y-%m-%d_%H-%M-%S')}.log"
     results_csv = METRICS_DIR / RESULTS_CSV_NAME
 
-    total_configs = len(DATASETS) * len(MODEL_CONFIGS) * NUM_FOLDS
+    total_configs = sum(
+        len(MODEL_CONFIGS_BY_DATASET[name]) * NUM_FOLDS for name, _, _ in DATASETS
+    )
     done_configs = [0]
 
     def progress_cb(**info):
@@ -152,6 +188,7 @@ def main() -> None:
         print(f"[CSV]   {results_csv}")
 
         for name, root, scanner in DATASETS:
+            model_configs = MODEL_CONFIGS_BY_DATASET[name]
             print(f"\nScanning dataset: {name} at {root}")
             df = scan_dataset(name, root, scanner, num_folds=NUM_FOLDS, seed=SEED)
 
@@ -165,7 +202,7 @@ def main() -> None:
                 name=name,
                 df=df,
                 run_dir=run_dir,
-                model_configs=MODEL_CONFIGS,
+                model_configs=model_configs,
                 balance_mode=BALANCE_MODE,
                 num_folds=NUM_FOLDS,
                 batch_size=BATCH_SIZE,
