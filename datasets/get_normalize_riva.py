@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from datasets.datasets import (
+from datasets import (
     NORM_STATS_PATH,
     compute_mean_std_for_df,
     scan_riva,
