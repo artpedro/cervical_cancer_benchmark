@@ -6,8 +6,10 @@ from typing import Any
 import timm
 import torch
 import torchvision.models as tvm
-from eat import EATClassifier, EATConfig, build_eat
 from torch import nn
+
+from eat import EATClassifier, EATConfig, build_eat
+from iformer import build_iformer_m
 
 
 def count_parameters(model: nn.Module, trainable_only: bool = False) -> int:
@@ -65,6 +67,38 @@ def _adapt_head(model: nn.Module, num_classes: int = 2) -> int:
     raise RuntimeError("Could not find a Linear/Conv2d classification head.")
 
 
+def _get_classifier_in_features(model: nn.Module) -> int:
+    """
+    Robustly infer classifier input width without modifying the head.
+    """
+    if hasattr(model, "get_classifier"):
+        cls = model.get_classifier()
+        in_feats = getattr(cls, "in_features", getattr(cls, "in_channels", None))
+        if in_feats is not None:
+            return int(in_feats)
+
+    for attr in ("head", "classifier", "fc", "_fc"):
+        if not hasattr(model, attr):
+            continue
+
+        mod = getattr(model, attr)
+
+        if isinstance(mod, nn.Linear):
+            return int(mod.in_features)
+
+        if isinstance(mod, nn.Conv2d):
+            return int(mod.in_channels)
+
+        if isinstance(mod, nn.Sequential):
+            for layer in reversed(list(mod.children())):
+                if isinstance(layer, nn.Linear):
+                    return int(layer.in_features)
+                if isinstance(layer, nn.Conv2d):
+                    return int(layer.in_channels)
+
+    raise RuntimeError("Could not infer classifier input features.")
+
+
 def _load_checkpoint_if_needed(
     model: nn.Module,
     checkpoint_path: str | Path | None = None,
@@ -81,6 +115,8 @@ def _load_checkpoint_if_needed(
             state_dict = ckpt["model_state"]
         elif "state_dict" in ckpt:
             state_dict = ckpt["state_dict"]
+        elif "model" in ckpt:
+            state_dict = ckpt["model"]
         else:
             state_dict = ckpt
     else:
@@ -106,7 +142,24 @@ def _build_eat_from_kwargs(
     return EATClassifier(cfg)
 
 
+def _build_iformer_m_from_kwargs(
+    num_classes: int,
+    **kwargs: Any,
+) -> nn.Module:
+    return build_iformer_m(
+        num_classes=num_classes,
+        in_chans=kwargs.pop("in_chans", 3),
+        drop_path_rate=kwargs.pop("drop_path_rate", 0.0),
+        layer_scale_init_value=kwargs.pop("layer_scale_init_value", 0.0),
+    )
+
+
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+    "iformer_m": {
+        "source": "custom",
+        "canonical_name": "iformer_m",
+        "max_params_m": 30.0,
+    },
     "eat": {
         "source": "custom",
         "canonical_name": "eat",
@@ -241,18 +294,34 @@ def load_any(
     source = spec["source"]
     canonical_name = spec["canonical_name"]
 
+    registry_limit = spec.get("max_params_m")
+    effective_max_params_m = registry_limit if registry_limit is not None else max_params_m
+
     model: nn.Module
     origin: str
 
     if source == "custom":
-        img_size = model_kwargs.pop("img_size", 144)
-        model = _build_eat_from_kwargs(
-            num_classes=num_classes,
-            img_size=img_size,
-            **model_kwargs,
-        )
-        in_features = model.head.in_features
-        origin = f"custom:{canonical_name}"
+        if canonical_name == "eat":
+            img_size = model_kwargs.pop("img_size", 144)
+            model = _build_eat_from_kwargs(
+                num_classes=num_classes,
+                img_size=img_size,
+                **model_kwargs,
+            )
+            origin = "custom:eat"
+
+        elif canonical_name == "iformer_m":
+            model = _build_iformer_m_from_kwargs(
+                num_classes=num_classes,
+                **model_kwargs,
+            )
+            origin = "custom:iformer_m"
+
+        else:
+            raise ValueError(f"Unsupported custom model: {canonical_name}")
+
+        in_features = _get_classifier_in_features(model)
+
     elif source == "timm":
         try:
             model = timm.create_model(
@@ -278,8 +347,11 @@ def load_any(
                 "in_features",
                 getattr(cls, "in_channels", None),
             )
+            if in_features is None:
+                in_features = _adapt_head(model, num_classes)
         else:
             in_features = _adapt_head(model, num_classes)
+
     elif source == "torchvision":
         tv_ctor = TV_REGISTRY[canonical_name]
 
@@ -296,6 +368,7 @@ def load_any(
 
         in_features = _adapt_head(model, num_classes)
         origin = f"torchvision:{canonical_name}"
+
     elif source == "hub":
         if canonical_name == "ghostnet":
             model = torch.hub.load("pytorch/vision", "ghostnet_1x", pretrained=pretrained)
@@ -303,6 +376,7 @@ def load_any(
             origin = "hub:ghostnet"
         else:
             raise ValueError(f"Unsupported hub model: {canonical_name}")
+
     else:
         raise ValueError(f"Unsupported source type: {source}")
 
@@ -316,14 +390,13 @@ def load_any(
 
     n_params = count_parameters(model, trainable_only=False)
     n_params_m = n_params / 1_000_000
-    if n_params_m > max_params_m:
+    if n_params_m > effective_max_params_m:
         raise ValueError(
             f"Model '{name}' has {n_params_m:.3f}M parameters, "
-            f"which exceeds max_params_m={max_params_m:.1f}M."
+            f"which exceeds max_params_m={effective_max_params_m:.1f}M."
         )
 
     return model, in_features, origin, n_params
 
 
 __all__ = ["load_any", "MODEL_REGISTRY", "count_parameters"]
-
