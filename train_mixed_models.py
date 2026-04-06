@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+import pandas as pd
 import torch
 
-from datasets.datasets import NORM_STATS_PATH, scan_riva, scan_sipakmed
+from datasets.datasets import NORM_STATS_PATH, scan_herlev, scan_riva, scan_sipakmed
 from training.io_utils import env_path, setup_run_dir, tee_log
-from training.pipeline import scan_dataset, train_dataset_v2
+from training.pipeline import scan_dataset, train_mixed_dataset_v2
 
 # =============================================================================
 # CONFIG — edit here
@@ -28,13 +29,23 @@ METRICS_DIR = env_path("METRICS_DIR", "workspace", "metricsv2")
 RUNS_DIR = env_path("RUNS_DIR", "workspace", "runsv2")
 DATA_ROOT = env_path("DATA_ROOT", "datasets", "data")
 
-RESULTS_CSV_NAME = "training_time_results_v2.csv"
+RESULTS_CSV_NAME = "training_time_results_mixed.csv"
 PRINT_EVERY_EPOCH = 1
 USE_AMP = True
 
-DATASETS: list[tuple[str, Path, Callable]] = [
-    ("sipakmed", DATA_ROOT / "sipakmed", scan_sipakmed),
-    ("riva", DATA_ROOT / "riva", scan_riva),
+# All three scanners use the same CV seed / fold count so fold indices align across sources.
+SCANNERS: dict[str, tuple[Path, Callable[..., pd.DataFrame]]] = {
+    "sipakmed": (DATA_ROOT / "sipakmed", scan_sipakmed),
+    "riva": (DATA_ROOT / "riva", scan_riva),
+    "herlev": (DATA_ROOT / "herlev", scan_herlev),
+}
+
+# Pairwise mixed training: (name_a, name_b) — train/val folds use both train_dev splits;
+# test evaluates on the concatenated test splits from both datasets.
+MIXED_PAIRS: list[tuple[str, str]] = [
+    ("sipakmed", "riva"),
+    ("riva", "herlev"),
+    ("herlev", "sipakmed"),
 ]
 
 
@@ -237,7 +248,35 @@ ALL_MODEL_CONFIGS: list[ModelTrainConfig] = [
 MODEL_CONFIGS_BY_DATASET: dict[str, list[ModelTrainConfig]] = {
     "sipakmed": ALL_MODEL_CONFIGS,
     "riva": ALL_MODEL_CONFIGS,
+    "herlev": ALL_MODEL_CONFIGS,
 }
+
+
+def merge_model_configs_for_pair(a: str, b: str) -> list[ModelTrainConfig]:
+    """Union of both datasets' model lists, deduplicated by ``backbone_id`` (first wins)."""
+    seen: set[str] = set()
+    out: list[ModelTrainConfig] = []
+    for cfg in MODEL_CONFIGS_BY_DATASET[a] + MODEL_CONFIGS_BY_DATASET[b]:
+        if cfg.backbone_id in seen:
+            continue
+        seen.add(cfg.backbone_id)
+        out.append(cfg)
+    return out
+
+
+def build_mixed_dataframe(name_a: str, name_b: str) -> pd.DataFrame:
+    root_a, scan_a = SCANNERS[name_a]
+    root_b, scan_b = SCANNERS[name_b]
+    df_a = scan_dataset(name_a, root_a, scan_a, num_folds=NUM_FOLDS, seed=SEED)
+    df_b = scan_dataset(name_b, root_b, scan_b, num_folds=NUM_FOLDS, seed=SEED)
+    df_a = df_a.assign(source_dataset=name_a)
+    df_b = df_b.assign(source_dataset=name_b)
+    return pd.concat([df_a, df_b], ignore_index=True)
+
+
+def mixed_run_slug(name_a: str, name_b: str) -> str:
+    return f"{name_a}_{name_b}"
+
 
 # =============================================================================
 # Runtime setup
@@ -254,24 +293,41 @@ torch.backends.cudnn.benchmark = True
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
+def _dataset_root_exists(name: str) -> bool:
+    return SCANNERS[name][0].exists()
+
+
+def _effective_mixed_pairs() -> tuple[list[tuple[str, str]], list[str]]:
+    """Pairs where both dataset roots exist; plus list of missing paths."""
+    missing_paths = [str(SCANNERS[n][0]) for n in SCANNERS if not _dataset_root_exists(n)]
+    available = {n for n in SCANNERS if _dataset_root_exists(n)}
+    effective = [(a, b) for a, b in MIXED_PAIRS if a in available and b in available]
+    return effective, missing_paths
+
+
 def main() -> None:
+    mixed_run, missing_paths = _effective_mixed_pairs()
+    if not mixed_run:
+        raise FileNotFoundError(
+            "No mixed pair can run: every dataset root is missing. Set DATA_ROOT or add:\n"
+            + "\n".join(f"  - {p}" for p in missing_paths)
+        )
+
     print("\n" + "=" * 70)
-    print("train_models_v2 — weighted_loss only, 5-fold CV, per-model epochs & schedule")
+    print(
+        "train_mixed_models — mixed two-source training, aligned CV folds, "
+        "combined val + test (per-source test F1 in summary)"
+    )
     print("=" * 70)
     print(f"BALANCE_MODE: {BALANCE_MODE}")
-    print(f"Datasets: {[d[0] for d in DATASETS]}")
+    print(f"Configured mixed pairs: {MIXED_PAIRS}")
     print(f"Data root: {DATA_ROOT.resolve()}")
-    for dataset_name, _, _ in DATASETS:
-        model_names = [c.display_name for c in MODEL_CONFIGS_BY_DATASET[dataset_name]]
-        print(f"Models for {dataset_name}: {model_names}")
+    if missing_paths:
+        print("\n[WARN] Missing dataset root(s); skipping pairs that need them:")
+        for p in missing_paths:
+            print(f"       - {p}")
+    print(f"\nMixed runs (this session): {mixed_run}")
     print("=" * 70 + "\n")
-
-    missing_roots = [str(root) for _, root, _ in DATASETS if not root.exists()]
-    if missing_roots:
-        raise FileNotFoundError(
-            "Missing dataset roots. Set DATA_ROOT or create these paths:\n"
-            + "\n".join(f"  - {p}" for p in missing_roots)
-        )
 
     run_start_dt = datetime.datetime.now()
     run_start_str = run_start_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -279,11 +335,11 @@ def main() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
-    log_path = RUNS_DIR / f"terminal_v2_{run_start_dt.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    log_path = RUNS_DIR / f"terminal_mixed_{run_start_dt.strftime('%Y-%m-%d_%H-%M-%S')}.log"
     results_csv = METRICS_DIR / RESULTS_CSV_NAME
 
     total_configs = sum(
-        len(MODEL_CONFIGS_BY_DATASET[name]) * NUM_FOLDS for name, _, _ in DATASETS
+        len(merge_model_configs_for_pair(a, b)) * NUM_FOLDS for a, b in mixed_run
     )
     done_configs = [0]
 
@@ -297,20 +353,22 @@ def main() -> None:
         print(f"[LOG]   {log_path}")
         print(f"[CSV]   {results_csv}")
 
-        for name, root, scanner in DATASETS:
-            model_configs = MODEL_CONFIGS_BY_DATASET[name]
-            print(f"\nScanning dataset: {name} at {root}")
-            df = scan_dataset(name, root, scanner, num_folds=NUM_FOLDS, seed=SEED)
+        for name_a, name_b in mixed_run:
+            slug = mixed_run_slug(name_a, name_b)
+            model_configs = merge_model_configs_for_pair(name_a, name_b)
+            print(f"\nScanning mixed pair: {slug} ({name_a} + {name_b})")
+            df = build_mixed_dataframe(name_a, name_b)
 
             print("\n" + "-" * 70)
-            print(f"Starting training on {name} | {BALANCE_MODE}")
+            print(f"Training mixed {slug} | models: {[c.display_name for c in model_configs]}")
             print("-" * 70 + "\n")
 
-            run_dir = setup_run_dir(METRICS_DIR, dataset_name=name, balance_mode=BALANCE_MODE)
+            run_dir = setup_run_dir(METRICS_DIR, dataset_name=slug, balance_mode=BALANCE_MODE)
 
-            train_dataset_v2(
-                name=name,
+            train_mixed_dataset_v2(
+                name=slug,
                 df=df,
+                source_names=(name_a, name_b),
                 run_dir=run_dir,
                 model_configs=model_configs,
                 balance_mode=BALANCE_MODE,
@@ -326,7 +384,7 @@ def main() -> None:
             )
 
         print("\n" + "=" * 70)
-        print("train_models_v2 COMPLETE (weighted_loss, all listed datasets)")
+        print("train_mixed_models COMPLETE (all listed pairs)")
         print("=" * 70 + "\n")
     finally:
         import sys
