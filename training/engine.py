@@ -103,10 +103,12 @@ def run_epoch(
     f1 = (2.0 * prec * rec) / (prec + rec + EPS)
     ppv = prec
     npv = tn_f / (tn_f + fn_f + EPS)
+    bal_acc = (rec + spec) / 2.0
 
     return {
         "loss": total_loss / max(1, n_samples),
         "acc": float(acc.item()),
+        "bal_acc": float(bal_acc.item()),
         "prec": float(prec.item()),
         "rec": float(rec.item()),
         "spec": float(spec.item()),
