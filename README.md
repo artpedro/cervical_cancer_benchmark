@@ -1,6 +1,6 @@
-# Cervical-cancer CNN
+# Cervical-cancer CNN + Hybrid Transformers
 
-Binary pap-smear classification (train CNNs on SIPaKMeD / Riva / Herlev, mixed runs, CV).
+Binary pap-smear classification (train CNNs and Hybrid Transformerson SIPaKMeD / Riva / Herlev, mixed runs, CV).
 
 ## Setup
 
