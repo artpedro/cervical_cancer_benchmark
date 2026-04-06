@@ -414,6 +414,42 @@ class PapDataset(Dataset):
         return self.tf(img), int(self.df.binary_idx[idx])
 
 
+class MixedSourcePapDataset(Dataset):
+    """
+    Like PapDataset but applies train vs eval transforms per row based on ``source_dataset``.
+    ``source_dataset`` values must match keys in the *_tf_by_source dicts (e.g. sipakmed, riva).
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        train_tf_by_source: dict[str, T.Compose],
+        eval_tf_by_source: dict[str, T.Compose],
+        *,
+        is_training: bool,
+    ):
+        if "source_dataset" not in df.columns:
+            raise ValueError("MixedSourcePapDataset requires a 'source_dataset' column")
+        self.df = df.reset_index(drop=True)
+        self.train_tf_by_source = train_tf_by_source
+        self.eval_tf_by_source = eval_tf_by_source
+        self.is_training = is_training
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, idx: int):
+        row = self.df.iloc[idx]
+        src = str(row["source_dataset"])
+        tf = (
+            self.train_tf_by_source[src]
+            if self.is_training
+            else self.eval_tf_by_source[src]
+        )
+        img = Image.open(row["path"]).convert("RGB")
+        return tf(img), int(row["binary_idx"])
+
+
 # ============================================================
 # SCANNERS (WITH HOLDOUT + FOLDS)
 # ============================================================
@@ -997,3 +1033,78 @@ def get_loaders(
         pin_memory=pin_memory,
     )
     return train_loader, val_loader
+
+
+def get_loaders_mixed(
+    df: pd.DataFrame,
+    fold: int,
+    *,
+    batch_size: int,
+    num_workers: int = 6,
+    pin_memory: bool = True,
+    train_tf_by_source: dict[str, T.Compose],
+    eval_tf_by_source: dict[str, T.Compose],
+) -> tuple[DataLoader, DataLoader]:
+    """
+    Same fold logic as ``get_loaders``, but each row uses transforms for its ``source_dataset``.
+    """
+    if "source_dataset" not in df.columns:
+        raise ValueError("get_loaders_mixed requires a 'source_dataset' column")
+    train_dev_df = df[df["split"] == "train_dev"].reset_index(drop=True)
+
+    train_df = train_dev_df[train_dev_df["fold"] != fold].reset_index(drop=True)
+    val_df = train_dev_df[train_dev_df["fold"] == fold].reset_index(drop=True)
+
+    train_loader = DataLoader(
+        MixedSourcePapDataset(
+            train_df,
+            train_tf_by_source,
+            eval_tf_by_source,
+            is_training=True,
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        MixedSourcePapDataset(
+            val_df,
+            train_tf_by_source,
+            eval_tf_by_source,
+            is_training=False,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    return train_loader, val_loader
+
+
+def get_loader_mixed_eval(
+    df: pd.DataFrame,
+    *,
+    batch_size: int,
+    num_workers: int = 6,
+    pin_memory: bool = True,
+    eval_tf_by_source: dict[str, T.Compose],
+) -> DataLoader:
+    """Single eval loader (e.g. test split) with per-source eval transforms."""
+    if "source_dataset" not in df.columns:
+        raise ValueError("get_loader_mixed_eval requires a 'source_dataset' column")
+    if df.empty:
+        raise ValueError("get_loader_mixed_eval got an empty DataFrame")
+    train_dummy = {k: v for k, v in eval_tf_by_source.items()}
+    return DataLoader(
+        MixedSourcePapDataset(
+            df.reset_index(drop=True),
+            train_dummy,
+            eval_tf_by_source,
+            is_training=False,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
