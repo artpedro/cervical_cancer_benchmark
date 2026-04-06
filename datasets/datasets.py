@@ -35,8 +35,8 @@ ABNORMAL = {
 }
 
 # RIVA binary mapping for this project (ignore other folders/classes)
-RIVA_NORMAL = {"Sin_lesion", "LSIL"}
-RIVA_ABNORMAL = {"CA", "HSIL"}
+RIVA_NORMAL = {"Sin_lesion",}
+RIVA_ABNORMAL = {"CA", "HSIL", 'LSIL'}
 RIVA_TARGET_CLASSES = RIVA_NORMAL | RIVA_ABNORMAL
 
 # ============================================================
