@@ -88,14 +88,6 @@ ALL_MODEL_CONFIGS: list[ModelTrainConfig] = [
         scheduler_gamma=0.5,
     ),
     ModelTrainConfig(
-        display_name="GhostNet",
-        backbone_id="ghostnet",
-        epochs=100,
-        lr=1e-3,
-        scheduler_milestones=[25, 50, 75],
-        scheduler_gamma=0.5,
-    ),
-    ModelTrainConfig(
         display_name="EfficientFormerV2 S0",
         backbone_id="efficientformerv2_s0",
         epochs=100,
@@ -186,14 +178,6 @@ ALL_MODEL_CONFIGS: list[ModelTrainConfig] = [
     ModelTrainConfig(
         display_name="MobileNet v2",
         backbone_id="mobilenetv2_100",
-        epochs=100,
-        lr=1e-3,
-        scheduler_milestones=[25, 50, 75],
-        scheduler_gamma=0.5,
-    ),
-    ModelTrainConfig(
-        display_name="MobileNet v2 (torchvision)",
-        backbone_id="tv_mobilenet_v2",
         epochs=100,
         lr=1e-3,
         scheduler_milestones=[25, 50, 75],
