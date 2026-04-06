@@ -35,7 +35,7 @@ ABNORMAL = {
 }
 
 # RIVA binary mapping for this project (ignore other folders/classes)
-RIVA_NORMAL = {"Sin_lesion", "ENDO"}
+RIVA_NORMAL = {"Sin_lesion", "LSIL"}
 RIVA_ABNORMAL = {"CA", "HSIL"}
 RIVA_TARGET_CLASSES = RIVA_NORMAL | RIVA_ABNORMAL
 
@@ -53,7 +53,11 @@ NORM_STATS_PATH = Path(__file__).resolve().parent / "normalization_stats.json"
 # TRANSFORM BUILDERS
 # ============================================================
 
-def make_tf(normalizing_matriz: Optional[List[List[float]]] = None) -> tuple[T.Compose, T.Compose]:
+def make_tf(
+    normalizing_matriz: Optional[List[List[float]]] = None,
+    *,
+    dataset_name: Optional[str] = None,
+) -> tuple[T.Compose, T.Compose]:
     """
     Create (train_tf, eval_tf) transforms.
 
@@ -62,6 +66,9 @@ def make_tf(normalizing_matriz: Optional[List[List[float]]] = None) -> tuple[T.C
     normalizing_matriz : list[list[float]] or None
         [[meanR, meanG, meanB], [stdR, stdG, stdB]].
         If None, falls back to IMAGENET_MEAN/STD.
+    dataset_name : str or None
+        If ``"riva"``, ``train_tf`` omits the leading ``Resize(224)`` so training
+        runs rotation and center-crop at native scale; ``eval_tf`` is unchanged.
 
     Returns
     -------
@@ -73,25 +80,28 @@ def make_tf(normalizing_matriz: Optional[List[List[float]]] = None) -> tuple[T.C
     else:
         mean, std = normalizing_matriz
 
-    train_tf = T.Compose(
+    train_steps: List = []
+    if dataset_name != "riva":
+        train_steps.append(T.Resize(224))
+    train_steps.extend(
         [
-            T.Resize(256),
-            T.CenterCrop(224),
             T.RandomRotation(
                 degrees=180,
                 interpolation=T.InterpolationMode.BILINEAR,
-                fill=(255, 255, 255),
-            ),  # white background
+                fill=(0, 0, 0),
+            ),
+            T.CenterCrop(224),
             T.RandomHorizontalFlip(0.5),
-            T.ColorJitter(0.2, 0.2, 0.2, 0.0),
+            T.ColorJitter(0.25, 0.25, 0.25, 0.0),
             T.ToTensor(),
             T.Normalize(mean, std),
         ]
     )
+    train_tf = T.Compose(train_steps)
 
     eval_tf = T.Compose(
         [
-            T.Resize(256),
+            T.Resize(224),
             T.CenterCrop(224),
             T.ToTensor(),
             T.Normalize(mean, std),
@@ -286,7 +296,7 @@ def make_tf_from_stats(
         max_samples_per_split=max_samples_per_split,
     )
     normalizing_matriz = [mean, std]
-    return make_tf(normalizing_matriz=normalizing_matriz)
+    return make_tf(normalizing_matriz=normalizing_matriz, dataset_name=dataset_name)
 
 
 def make_tf_from_stats_for_fold(
@@ -332,7 +342,7 @@ def make_tf_from_stats_for_fold(
     entry = stats[dataset_name][fold_key]
     mean = entry["mean"]
     std = entry["std"]
-    return make_tf(normalizing_matriz=[mean, std])
+    return make_tf(normalizing_matriz=[mean, std], dataset_name=dataset_name)
 
 
 def make_tf_from_stats_full(
@@ -380,7 +390,7 @@ def make_tf_from_stats_full(
         )
     mean = entry["mean"]
     std = entry["std"]
-    return make_tf(normalizing_matriz=[mean, std])
+    return make_tf(normalizing_matriz=[mean, std], dataset_name=dataset_name)
 
 
 # ============================================================
