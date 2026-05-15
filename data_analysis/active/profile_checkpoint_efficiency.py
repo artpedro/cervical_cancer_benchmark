@@ -17,6 +17,11 @@ from datasets.datasets import (
     scan_riva,
     scan_sipakmed,
 )
+from data_analysis.active.dataset_regime_utils import (
+    SOLO_DATASETS,
+    dataset_regime,
+    split_mixed_slug,
+)
 from model_loader import load_any
 
 
@@ -41,6 +46,7 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 # Set None to process all checkpoints.
 LIMIT_CHECKPOINTS: int | None = None
+LATENCY_MS_REPORT = "batch"
 
 OUT_DIR = ANALYSIS_DIR / "efficiency_profile"
 OUT_CSV_PER_CHECKPOINT = OUT_DIR / "per_checkpoint_efficiency.csv"
@@ -59,14 +65,21 @@ def _resolve_dataset_root(data_root: Path, dataset: str) -> Path:
     raise ValueError(f"Unsupported dataset: {dataset!r}")
 
 
-def _scan_dataset(dataset: str, root: Path) -> pd.DataFrame:
+def _scan_dataset(dataset: str, root: Path, *, num_folds: int) -> pd.DataFrame:
     if dataset == "herlev":
-        return scan_herlev(root=root, num_folds=NUM_FOLDS, seed=SEED, test_size=TEST_SIZE)
+        return scan_herlev(root=root, num_folds=num_folds, seed=SEED, test_size=TEST_SIZE)
     if dataset == "sipakmed":
-        return scan_sipakmed(root=root, num_folds=NUM_FOLDS, seed=SEED, test_size=TEST_SIZE)
+        return scan_sipakmed(root=root, num_folds=num_folds, seed=SEED, test_size=TEST_SIZE)
     if dataset == "riva":
-        return scan_riva(root=root, num_folds=NUM_FOLDS, seed=SEED, test_size=TEST_SIZE)
+        return scan_riva(root=root, num_folds=num_folds, seed=SEED, test_size=TEST_SIZE)
     raise ValueError(f"Unsupported dataset: {dataset!r}")
+
+
+def _eval_targets_for_training_dataset(train_dataset: str) -> tuple[str, ...]:
+    parts = split_mixed_slug(train_dataset, solo_datasets=SOLO_DATASETS)
+    if parts:
+        return parts
+    return (train_dataset,)
 
 
 def _canonical_from_origin(origin: str) -> tuple[str, str]:
@@ -264,20 +277,30 @@ def main() -> None:
 
     device = torch.device(DEVICE)
 
-    # Scan each dataset once.
+    # Infer folds for scan-time partitioning from all rows.
+    dataset_num_folds: dict[str, int] = {}
+    for _, row in ck_df.iterrows():
+        n_folds = max(2, int(row["fold"]) + 1)
+        for ds in _eval_targets_for_training_dataset(str(row["dataset"])):
+            dataset_num_folds[ds] = max(dataset_num_folds.get(ds, 2), n_folds)
+
+    # Scan each evaluation dataset once.
     dataset_frames: dict[str, pd.DataFrame] = {}
-    for ds in sorted(ck_df["dataset"].astype(str).unique().tolist()):
+    eval_datasets: set[str] = set()
+    for train_dataset in ck_df["dataset"].astype(str).unique().tolist():
+        eval_datasets.update(_eval_targets_for_training_dataset(train_dataset))
+    for ds in sorted(eval_datasets):
         root = _resolve_dataset_root(DATA_ROOT.resolve(), ds)
         if not root.exists():
             raise FileNotFoundError(f"Dataset root not found for {ds}: {root}")
         print(f"[scan] dataset={ds} root={root}")
-        dataset_frames[ds] = _scan_dataset(ds, root)
+        dataset_frames[ds] = _scan_dataset(ds, root, num_folds=int(dataset_num_folds[ds]))
 
     rows: list[dict[str, Any]] = []
     total = len(ck_df)
     for i, row in ck_df.iterrows():
         cfg_id = str(row["cfg_id"])
-        dataset = str(row["dataset"])
+        train_dataset = str(row["dataset"])
         model_name = str(row["model"])
         origin = str(row["origin"])
         fold = int(row["fold"])
@@ -285,21 +308,7 @@ def main() -> None:
 
         ckpt_path = _checkpoint_path_for_cfg(bundle_dir, cfg_id)
         print(
-            f"[{i+1}/{total}] profiling cfg={cfg_id} dataset={dataset} model={model_name} fold={fold}"
-        )
-
-        _, eval_tf = make_tf_from_stats_for_fold(dataset, fold, STATS_PATH.resolve())
-        df_test = dataset_frames[dataset]
-        df_test = df_test[df_test["split"] == "test"].reset_index(drop=True)
-        if df_test.empty:
-            raise RuntimeError(f"Empty test split for dataset={dataset}")
-
-        loader = DataLoader(
-            PapDataset(df_test, eval_tf),
-            batch_size=LATENCY_BATCH_SIZE,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            pin_memory=(device.type == "cuda"),
+            f"[{i+1}/{total}] profiling cfg={cfg_id} train_dataset={train_dataset} model={model_name} fold={fold}"
         )
 
         model = _build_model_for_checkpoint(
@@ -310,48 +319,69 @@ def main() -> None:
 
         n_params = _count_params(model)
         macs, flops = _compute_macs_flops(model)
-
-        # Put model back on target device after ptflops CPU pass.
-        model.to(device).eval()
-        (
-            latency_mean_ms_last5,
-            all_times_ms,
-            memory_mean_mb_last5,
-            memory_peak_mb_max10,
-            all_mem_mb,
-        ) = _measure_latency_ms(
-            model=model,
-            loader=loader,
-            device=device,
-            n_batches=LATENCY_NUM_BATCHES,
-            mean_last_k=LATENCY_MEAN_LAST_K,
-        )
-
-        rows.append(
-            {
-                "cfg_id": cfg_id,
-                "dataset": dataset,
-                "model": model_name,
-                "origin": origin,
-                "fold": fold,
-                "best_epoch": best_epoch,
-                "checkpoint_path": str(ckpt_path),
-                "n_test_samples": int(len(df_test)),
-                "params_count": int(n_params),
-                "macs_count": float(macs),
-                "flops_count": float(flops),
-                "latency_batch_size": LATENCY_BATCH_SIZE,
-                "latency_num_batches": LATENCY_NUM_BATCHES,
-                "latency_mean_last_k": LATENCY_MEAN_LAST_K,
-                "latency_mean_ms_last_k": float(latency_mean_ms_last5),
-                "latency_all_10_batches_ms": ";".join(f"{t:.6f}" for t in all_times_ms),
-                "memory_mean_mb_last_k": float(memory_mean_mb_last5),
-                "memory_peak_mb_max_10_batches": float(memory_peak_mb_max10),
-                "memory_all_10_batches_mb": ";".join(
-                    "nan" if (m != m) else f"{m:.6f}" for m in all_mem_mb
-                ),
-            }
-        )
+        eval_targets = _eval_targets_for_training_dataset(train_dataset)
+        for eval_dataset in eval_targets:
+            _, eval_tf = make_tf_from_stats_for_fold(eval_dataset, fold, STATS_PATH.resolve())
+            df_test = dataset_frames[eval_dataset]
+            df_test = df_test[df_test["split"] == "test"].reset_index(drop=True)
+            if df_test.empty:
+                raise RuntimeError(f"Empty test split for dataset={eval_dataset}")
+            loader = DataLoader(
+                PapDataset(df_test, eval_tf),
+                batch_size=LATENCY_BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                pin_memory=(device.type == "cuda"),
+            )
+            # Put model back on target device after ptflops CPU pass.
+            model.to(device).eval()
+            (
+                latency_mean_ms_last5,
+                all_times_ms,
+                memory_mean_mb_last5,
+                memory_peak_mb_max10,
+                all_mem_mb,
+            ) = _measure_latency_ms(
+                model=model,
+                loader=loader,
+                device=device,
+                n_batches=LATENCY_NUM_BATCHES,
+                mean_last_k=LATENCY_MEAN_LAST_K,
+            )
+            rows.append(
+                {
+                    "cfg_id": cfg_id,
+                    "dataset": eval_dataset,
+                    "train_dataset": train_dataset,
+                    "dataset_regime": dataset_regime(train_dataset),
+                    "mixed_sources": ",".join(eval_targets),
+                    "eval_scope": (
+                        "in_domain_test_split"
+                        if len(eval_targets) == 1
+                        else "mixed_source_test_split"
+                    ),
+                    "model": model_name,
+                    "origin": origin,
+                    "fold": fold,
+                    "best_epoch": best_epoch,
+                    "checkpoint_path": str(ckpt_path),
+                    "n_test_samples": int(len(df_test)),
+                    "params_count": int(n_params),
+                    "macs_count": float(macs),
+                    "flops_count": float(flops),
+                    "latency_batch_size": LATENCY_BATCH_SIZE,
+                    "latency_num_batches": LATENCY_NUM_BATCHES,
+                    "latency_mean_last_k": LATENCY_MEAN_LAST_K,
+                    "latency_ms_basis": LATENCY_MS_REPORT,
+                    "latency_mean_ms_last_k": float(latency_mean_ms_last5),
+                    "latency_all_10_batches_ms": ";".join(f"{t:.6f}" for t in all_times_ms),
+                    "memory_mean_mb_last_k": float(memory_mean_mb_last5),
+                    "memory_peak_mb_max_10_batches": float(memory_peak_mb_max10),
+                    "memory_all_10_batches_mb": ";".join(
+                        "nan" if (m != m) else f"{m:.6f}" for m in all_mem_mb
+                    ),
+                }
+            )
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

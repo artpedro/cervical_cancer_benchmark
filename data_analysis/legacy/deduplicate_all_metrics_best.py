@@ -30,6 +30,17 @@ def _latest_all_metrics_dir(workspace_dir: Path) -> Path:
     return candidates[-1]
 
 
+def _load_kind_csvs(all_metrics_dir: Path, stem: str) -> pd.DataFrame:
+    primary = all_metrics_dir / f"{stem}.csv"
+    schema_parts = sorted(all_metrics_dir.glob(f"{stem}__schema_*.csv"))
+    paths: list[Path] = [primary] if primary.exists() else []
+    paths.extend(schema_parts)
+    if not paths:
+        return pd.DataFrame()
+    frames = [pd.read_csv(p, low_memory=False) for p in paths]
+    return pd.concat(frames, axis=0, ignore_index=True, sort=False)
+
+
 def _require_cols(df: pd.DataFrame, cols: list[str], name: str) -> None:
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -144,22 +155,15 @@ def main() -> None:
     if not all_metrics_dir.exists():
         raise FileNotFoundError(f"all_metrics directory does not exist: {all_metrics_dir}")
 
-    summary_path = all_metrics_dir / "all_summary_weighted_loss.csv"
-    epoch_logs_path = all_metrics_dir / "all_epoch_logs_weighted_loss.csv"
-    fold_epoch_path = all_metrics_dir / "all_fold_epoch_metrics.csv"
-    training_time_path = all_metrics_dir / "all_training_time_results.csv"
-
-    if not summary_path.exists():
-        raise FileNotFoundError(f"Missing required file: {summary_path}")
-
-    summary_df = pd.read_csv(summary_path, low_memory=False)
-    epoch_logs_df = pd.read_csv(epoch_logs_path, low_memory=False) if epoch_logs_path.exists() else pd.DataFrame()
-    fold_epoch_df = pd.read_csv(fold_epoch_path, low_memory=False) if fold_epoch_path.exists() else pd.DataFrame()
-    training_time_df = (
-        pd.read_csv(training_time_path, low_memory=False)
-        if training_time_path.exists()
-        else pd.DataFrame()
-    )
+    summary_df = _load_kind_csvs(all_metrics_dir, "all_summary_weighted_loss")
+    if summary_df.empty:
+        raise FileNotFoundError(
+            f"Missing required summary CSV(s): {all_metrics_dir / 'all_summary_weighted_loss.csv'} "
+            f"or {all_metrics_dir / 'all_summary_weighted_loss__schema_*.csv'}"
+        )
+    epoch_logs_df = _load_kind_csvs(all_metrics_dir, "all_epoch_logs_weighted_loss")
+    fold_epoch_df = _load_kind_csvs(all_metrics_dir, "all_fold_epoch_metrics")
+    training_time_df = _load_kind_csvs(all_metrics_dir, "all_training_time_results")
 
     winners = _pick_best_summary_rows(summary_df)
 

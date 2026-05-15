@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from data_analysis.active.dataset_regime_utils import is_mixed_dataset
 
 # ============================================================
 # CONFIG
@@ -14,6 +15,7 @@ OUTPUT_DIR = Path("workspace/analysis/test_eval_results/plots")
 
 # Metrics to plot as model-comparison boxplots (per dataset)
 PLOT_METRICS = ["test_acc", "test_f1", "test_prec", "test_rec"]
+DATASET_GROUP_MODE = "all"  # all | solo_only | mixed_only
 
 
 def _require_columns(df: pd.DataFrame, cols: list[str]) -> None:
@@ -125,8 +127,12 @@ def main() -> None:
 
     df = pd.read_csv(csv_path, low_memory=False)
     _require_columns(df, ["dataset", "model"])
+    if DATASET_GROUP_MODE == "solo_only":
+        df = df[~df["dataset"].astype(str).map(is_mixed_dataset)].copy()
+    elif DATASET_GROUP_MODE == "mixed_only":
+        df = df[df["dataset"].astype(str).map(is_mixed_dataset)].copy()
     if len(df) == 0:
-        raise RuntimeError(f"CSV is empty: {csv_path}")
+        raise RuntimeError(f"CSV is empty after dataset filtering: {csv_path}")
 
     out_dir = OUTPUT_DIR.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

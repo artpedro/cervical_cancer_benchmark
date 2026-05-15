@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+from pandas.errors import ParserError
 
 
 def _discover_metrics_dirs(workspace_dir: Path) -> list[Path]:
@@ -71,6 +73,41 @@ def _iter_csvs(root: Path) -> Iterable[Path]:
     for p in sorted(root.rglob("*.csv")):
         if p.is_file():
             yield p
+
+
+def _read_csv_flexible(csv_path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(csv_path, low_memory=False)
+    except ParserError as exc:
+        print(f"[WARN] ParserError for {csv_path}; retrying with flexible CSV parser ({exc})")
+
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return pd.DataFrame()
+
+    header = [str(h) for h in rows[0]]
+    body = rows[1:]
+    max_cols = max((len(r) for r in rows), default=len(header))
+    if max_cols <= len(header):
+        return pd.DataFrame(body, columns=header)
+
+    extras = max_cols - len(header)
+    # Known mixed/solo drift: training_time_results gains test_f1_combined.
+    if csv_path.name.startswith("training_time_results") and extras == 1:
+        extra_cols = ["test_f1_combined"]
+    else:
+        extra_cols = [f"extra_col_{i:02d}" for i in range(1, extras + 1)]
+    columns = header + extra_cols
+
+    normalized_rows: list[list[str]] = []
+    for row in body:
+        if len(row) < max_cols:
+            row = row + [""] * (max_cols - len(row))
+        elif len(row) > max_cols:
+            row = row[:max_cols]
+        normalized_rows.append(row)
+    return pd.DataFrame(normalized_rows, columns=columns)
 
 
 def main() -> None:
@@ -135,7 +172,7 @@ def main() -> None:
             rel_csv_path = csv_path.relative_to(metrics_root)
             kind = _classify_csv(rel_csv_path)
 
-            df = pd.read_csv(csv_path, low_memory=False)
+            df = _read_csv_flexible(csv_path)
             cols = tuple(str(c) for c in df.columns)
             key = GroupKey(kind=kind, columns_sig=cols)
 

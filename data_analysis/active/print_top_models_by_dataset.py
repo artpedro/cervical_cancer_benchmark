@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from data_analysis.active.dataset_regime_utils import dataset_regime, is_mixed_dataset
 
 # ============================================================
 # CONFIG
@@ -17,6 +18,7 @@ SECONDARY_RANK_METRIC = "test_f1"
 
 # Metrics to report as mean +- std across folds
 REPORT_METRICS = ["test_acc", "test_f1", "test_prec", "test_rec", "test_spec"]
+DATASET_GROUP_MODE = "all"  # all | solo_only | mixed_only
 
 
 def _fmt(mean: float, std: float) -> str:
@@ -36,13 +38,23 @@ def main() -> None:
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
+    if "train_dataset" not in df.columns:
+        df["train_dataset"] = df["dataset"].astype(str)
+    if "dataset_regime" not in df.columns:
+        df["dataset_regime"] = df["train_dataset"].astype(str).map(dataset_regime)
+    if DATASET_GROUP_MODE == "solo_only":
+        df = df[~df["train_dataset"].astype(str).map(is_mixed_dataset)].copy()
+    elif DATASET_GROUP_MODE == "mixed_only":
+        df = df[df["train_dataset"].astype(str).map(is_mixed_dataset)].copy()
+    if df.empty:
+        raise RuntimeError("No rows remain after dataset regime filtering.")
 
     metric_cols = [m for m in REPORT_METRICS if m in df.columns]
     if not metric_cols:
         raise ValueError("None of REPORT_METRICS columns are present in the CSV.")
 
     grouped = (
-        df.groupby(["dataset", "model", "origin"], as_index=False)[metric_cols]
+        df.groupby(["dataset", "train_dataset", "dataset_regime", "model", "origin"], as_index=False)[metric_cols]
         .agg(["mean", "std"])
     )
     grouped.columns = [
@@ -51,11 +63,15 @@ def main() -> None:
 
     # Preserve fold count to show robustness of summary.
     fold_count = (
-        df.groupby(["dataset", "model", "origin"], as_index=False)["fold"]
+        df.groupby(["dataset", "train_dataset", "dataset_regime", "model", "origin"], as_index=False)["fold"]
         .nunique()
         .rename(columns={"fold": "n_folds"})
     )
-    grouped = grouped.merge(fold_count, on=["dataset", "model", "origin"], how="left")
+    grouped = grouped.merge(
+        fold_count,
+        on=["dataset", "train_dataset", "dataset_regime", "model", "origin"],
+        how="left",
+    )
 
     pr_mean = f"{PRIMARY_RANK_METRIC}_mean"
     sr_mean = f"{SECONDARY_RANK_METRIC}_mean"
@@ -76,7 +92,8 @@ def main() -> None:
 
         for rank, row in enumerate(ds.itertuples(index=False), start=1):
             print(
-                f"{rank:>2}. {row.model}  | origin={row.origin}  | folds={int(row.n_folds)}"
+                f"{rank:>2}. {row.model}  | origin={row.origin}  | "
+                f"train={row.train_dataset} ({row.dataset_regime})  | folds={int(row.n_folds)}"
             )
             for metric in metric_cols:
                 m = float(getattr(row, f"{metric}_mean"))

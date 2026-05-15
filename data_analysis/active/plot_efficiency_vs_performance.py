@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from data_analysis.active.dataset_regime_utils import is_mixed_dataset
 
 # ============================================================
 # CONFIG
@@ -26,6 +27,7 @@ Y_COLS = [
     ("test_acc", "Accuracy"),
     ("test_f1", "F1-score"),
 ]
+DATASET_GROUP_MODE = "all"  # all | solo_only | mixed_only
 
 
 def _model_family(model_name: str) -> str:
@@ -41,6 +43,20 @@ def _merge_inputs(eff: pd.DataFrame, tst: pd.DataFrame) -> pd.DataFrame:
     for k in keys:
         if k not in eff.columns or k not in tst.columns:
             raise ValueError(f"Missing join key {k!r} in input CSVs.")
+    def _collapse_duplicates(df: pd.DataFrame, label: str) -> pd.DataFrame:
+        dupes = int(df.duplicated(subset=keys).sum())
+        if not dupes:
+            return df
+        print(f"[WARN] {label} CSV has {dupes} duplicate key rows; aggregating mean per key.")
+        agg: dict[str, str] = {}
+        for col in df.columns:
+            if col in keys:
+                continue
+            agg[col] = "mean" if pd.api.types.is_numeric_dtype(df[col]) else "first"
+        return df.groupby(keys, as_index=False).agg(agg)
+
+    eff = _collapse_duplicates(eff, "efficiency")
+    tst = _collapse_duplicates(tst, "test")
     df = eff.merge(
         tst[keys + [y for y, _ in Y_COLS]],
         on=keys,
@@ -164,6 +180,12 @@ def main() -> None:
     eff = pd.read_csv(eff_csv, low_memory=False)
     tst = pd.read_csv(tst_csv, low_memory=False)
     df = _merge_inputs(eff, tst)
+    if DATASET_GROUP_MODE == "solo_only":
+        df = df[~df["dataset"].astype(str).map(is_mixed_dataset)].copy()
+    elif DATASET_GROUP_MODE == "mixed_only":
+        df = df[df["dataset"].astype(str).map(is_mixed_dataset)].copy()
+    if df.empty:
+        raise RuntimeError("No rows left after dataset group filtering.")
 
     out_dir = OUT_DIR.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

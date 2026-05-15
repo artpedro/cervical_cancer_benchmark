@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from data_analysis.active.dataset_regime_utils import is_mixed_dataset
 
 # ============================================================
 # CONFIG
@@ -25,6 +26,7 @@ PARAMS_COL = "params_count"
 MACS_COL = "macs_count"
 FLOPS_COL = "flops_count"
 MEM_COL = "memory_mean_mb_last_k"
+DATASET_GROUP_MODE = "all"  # all | solo_only | mixed_only
 
 
 def _model_family(model_name: str) -> str:
@@ -130,6 +132,15 @@ def _scatter_with_front(
     print(f"[OK] wrote {out_path}")
 
 
+def _best_join_keys(eff: pd.DataFrame, tst: pd.DataFrame) -> list[str]:
+    preferred = ["cfg_id", "dataset", "model", "origin", "fold", "best_epoch"]
+    common = [k for k in preferred if k in eff.columns and k in tst.columns]
+    mandatory = {"cfg_id", "dataset", "model"}
+    if not mandatory.issubset(common):
+        raise ValueError(f"Missing mandatory join keys. Need at least {sorted(mandatory)}.")
+    return common
+
+
 def main() -> None:
     eff_csv = EFF_CSV.resolve()
     test_csv = TEST_CSV.resolve()
@@ -150,9 +161,10 @@ def main() -> None:
     if miss_tst:
         raise ValueError(f"Test CSV missing columns: {miss_tst}")
 
+    join_keys = _best_join_keys(eff, tst)
     df = eff.merge(
-        tst[["cfg_id", "dataset", "model", ACC_COL, F1_COL]],
-        on=["cfg_id", "dataset", "model"],
+        tst[join_keys + [ACC_COL, F1_COL]],
+        on=join_keys,
         how="inner",
     )
     if df.empty:
@@ -162,6 +174,12 @@ def main() -> None:
     for col in [LAT_COL, PARAMS_COL, MACS_COL, FLOPS_COL, MEM_COL, ACC_COL, F1_COL]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=[LAT_COL, PARAMS_COL, MACS_COL, FLOPS_COL, MEM_COL, ACC_COL, F1_COL]).copy()
+    if DATASET_GROUP_MODE == "solo_only":
+        df = df[~df["dataset"].astype(str).map(is_mixed_dataset)].copy()
+    elif DATASET_GROUP_MODE == "mixed_only":
+        df = df[df["dataset"].astype(str).map(is_mixed_dataset)].copy()
+    if df.empty:
+        raise RuntimeError("No rows left after merge/filtering for pareto analysis.")
 
     out_dir = OUT_DIR.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
