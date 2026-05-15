@@ -16,6 +16,11 @@ from datasets.datasets import (
     scan_riva,
     scan_sipakmed,
 )
+from data_analysis.active.dataset_regime_utils import (
+    SOLO_DATASETS,
+    dataset_regime,
+    split_mixed_slug,
+)
 from model_loader import load_any
 from training.engine import run_epoch
 
@@ -67,6 +72,13 @@ def _scan_dataset(
     if dataset == "riva":
         return scan_riva(root=root, num_folds=num_folds, seed=seed, test_size=test_size)
     raise ValueError(f"Unsupported dataset: {dataset!r}")
+
+
+def _eval_targets_for_training_dataset(train_dataset: str) -> tuple[str, ...]:
+    parts = split_mixed_slug(train_dataset, solo_datasets=SOLO_DATASETS)
+    if parts:
+        return parts
+    return (train_dataset,)
 
 
 def _canonical_from_origin(origin: str) -> tuple[str, str]:
@@ -178,14 +190,18 @@ def main() -> None:
     merged_all["fold"] = merged_all["fold"].astype(int)
     merged_all["best_epoch"] = merged_all["best_epoch"].astype(int)
     merged_all = merged_all.sort_values(["dataset", "model", "fold"]).reset_index(drop=True)
-
-    # Infer folds from full merged table, even when evaluating a limited subset.
-    dataset_num_folds = (
-        merged_all.groupby("dataset")["fold"].max().astype(int).add(1).to_dict()
+    merged_all["train_dataset"] = merged_all["dataset"].astype(str)
+    merged_all["train_dataset_regime"] = merged_all["train_dataset"].map(dataset_regime)
+    merged_all["mixed_sources"] = merged_all["train_dataset"].map(
+        lambda d: ",".join(_eval_targets_for_training_dataset(d))
     )
-    dataset_num_folds = {
-        ds: max(2, n_folds) for ds, n_folds in dataset_num_folds.items()
-    }
+
+    # Infer folds for scan-time CV partitioning from all rows.
+    dataset_num_folds: dict[str, int] = {}
+    for _, row in merged_all.iterrows():
+        n_folds = max(2, int(row["fold"]) + 1)
+        for ds in _eval_targets_for_training_dataset(str(row["train_dataset"])):
+            dataset_num_folds[ds] = max(dataset_num_folds.get(ds, 2), n_folds)
 
     merged = merged_all.copy()
 
@@ -197,9 +213,12 @@ def main() -> None:
     pin_memory = device.type == "cuda"
     use_amp = device.type == "cuda"
 
-    # Scan each dataset once with num_folds inferred from selected rows.
+    # Scan each evaluation dataset once with num_folds inferred from selected rows.
     dataset_df: dict[str, pd.DataFrame] = {}
-    for dataset in sorted(merged["dataset"].unique()):
+    eval_datasets: set[str] = set()
+    for train_dataset in merged["train_dataset"].astype(str).unique().tolist():
+        eval_datasets.update(_eval_targets_for_training_dataset(train_dataset))
+    for dataset in sorted(eval_datasets):
         inferred_num_folds = int(dataset_num_folds[dataset])
         root = _resolve_dataset_root(DATA_ROOT.resolve(), dataset)
         if not root.exists():
@@ -223,7 +242,7 @@ def main() -> None:
     total = len(merged)
     for i, row in merged.iterrows():
         cfg_id = str(row["cfg_id"])
-        dataset = str(row["dataset"])
+        train_dataset = str(row["train_dataset"])
         model = str(row["model"])
         origin = str(row["origin"])
         fold = int(row["fold"])
@@ -231,23 +250,8 @@ def main() -> None:
 
         ckpt_path = _checkpoint_path_for_cfg(bundle_dir, cfg_id)
         print(
-            f"[{i+1}/{total}] eval cfg={cfg_id} dataset={dataset} model={model} "
+            f"[{i+1}/{total}] eval cfg={cfg_id} train_dataset={train_dataset} model={model} "
             f"fold={fold} epoch={best_epoch}"
-        )
-
-        _, eval_tf = make_tf_from_stats_for_fold(dataset, fold, STATS_PATH.resolve())
-
-        df = dataset_df[dataset]
-        test_df = df[df["split"] == "test"].reset_index(drop=True)
-        if test_df.empty:
-            raise RuntimeError(f"Empty test split for dataset={dataset}")
-
-        loader = DataLoader(
-            PapDataset(test_df, eval_tf),
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            pin_memory=pin_memory,
         )
 
         model_obj = _build_model_for_checkpoint(
@@ -255,32 +259,53 @@ def main() -> None:
             checkpoint_path=ckpt_path,
             device=device,
         )
-        metrics = run_epoch(
-            dataloader=loader,
-            model=model_obj,
-            criterion=criterion,
-            split_name="test",
-            optimiser=None,
-            scaler=None,
-            use_amp=use_amp,
-            device=device,
-        )
+        eval_targets = _eval_targets_for_training_dataset(train_dataset)
+        for eval_dataset in eval_targets:
+            _, eval_tf = make_tf_from_stats_for_fold(eval_dataset, fold, STATS_PATH.resolve())
+            df = dataset_df[eval_dataset]
+            test_df = df[df["split"] == "test"].reset_index(drop=True)
+            if test_df.empty:
+                raise RuntimeError(f"Empty test split for dataset={eval_dataset}")
+            loader = DataLoader(
+                PapDataset(test_df, eval_tf),
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                pin_memory=pin_memory,
+            )
+            metrics = run_epoch(
+                dataloader=loader,
+                model=model_obj,
+                criterion=criterion,
+                split_name="test",
+                optimiser=None,
+                scaler=None,
+                use_amp=use_amp,
+                device=device,
+            )
+            out = {
+                "cfg_id": cfg_id,
+                "dataset": eval_dataset,
+                "train_dataset": train_dataset,
+                "dataset_regime": dataset_regime(train_dataset),
+                "mixed_sources": ",".join(eval_targets),
+                "eval_scope": (
+                    "in_domain_test_split"
+                    if len(eval_targets) == 1
+                    else "mixed_source_test_split"
+                ),
+                "model": model,
+                "origin": origin,
+                "fold": fold,
+                "best_epoch": best_epoch,
+                "checkpoint_path": str(ckpt_path),
+                "n_test_samples": int(len(test_df)),
+            }
+            for k in METRIC_KEYS:
+                out[f"test_{k}"] = float(metrics[k])
+            rows.append(out)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-        out = {
-            "cfg_id": cfg_id,
-            "dataset": dataset,
-            "model": model,
-            "origin": origin,
-            "fold": fold,
-            "best_epoch": best_epoch,
-            "checkpoint_path": str(ckpt_path),
-            "n_test_samples": int(len(test_df)),
-        }
-        for k in METRIC_KEYS:
-            out[f"test_{k}"] = float(metrics[k])
-        rows.append(out)
 
     per_ckpt = pd.DataFrame(rows)
     per_ckpt_path = out_dir / "per_checkpoint_test_metrics.csv"

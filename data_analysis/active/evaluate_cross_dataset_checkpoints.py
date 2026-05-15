@@ -16,6 +16,11 @@ from datasets.datasets import (
     scan_riva,
     scan_sipakmed,
 )
+from data_analysis.active.dataset_regime_utils import (
+    SOLO_DATASETS,
+    dataset_regime,
+    split_mixed_slug,
+)
 from model_loader import load_any
 from training.engine import run_epoch
 
@@ -28,9 +33,10 @@ BUNDLE_DIR = ANALYSIS_DIR / "all_metrics_dedup_bundle"
 DATA_ROOT = Path("datasets/data")
 STATS_PATH = NORM_STATS_PATH
 
-ALL_DATASETS = ("herlev", "sipakmed", "riva")
-FULL_TARGET_DATASETS = {"riva", "herlev","sipakmed"}  # extra "entire dataset" evaluation
+DEFAULT_TARGET_DATASETS = SOLO_DATASETS
+FULL_TARGET_DATASETS = {"riva", "herlev", "sipakmed"}  # extra full-dataset evaluation
 INCLUDE_SAME_DATASET = False  # cross-dataset only
+SOURCE_STATS_POLICY = "first_source"  # first_source | error
 
 SEED = 42
 TEST_SIZE = 0.2
@@ -69,6 +75,24 @@ def _scan_dataset(dataset: str, root: Path) -> pd.DataFrame:
     if dataset == "riva":
         return scan_riva(root=root, num_folds=NUM_FOLDS, seed=SEED, test_size=TEST_SIZE)
     raise ValueError(f"Unsupported dataset: {dataset!r}")
+
+
+def _source_components(source_dataset: str) -> tuple[str, ...]:
+    parts = split_mixed_slug(source_dataset, solo_datasets=SOLO_DATASETS)
+    if parts:
+        return parts
+    return (source_dataset,)
+
+
+def _stats_dataset_for_source(source_dataset: str) -> str:
+    parts = _source_components(source_dataset)
+    if len(parts) == 1:
+        return parts[0]
+    if SOURCE_STATS_POLICY == "first_source":
+        return parts[0]
+    raise ValueError(
+        f"Unsupported SOURCE_STATS_POLICY={SOURCE_STATS_POLICY!r} for source={source_dataset!r}"
+    )
 
 
 def _canonical_from_origin(origin: str) -> tuple[str, str]:
@@ -212,10 +236,21 @@ def main() -> None:
     if LIMIT_CHECKPOINTS is not None:
         checkpoints_df = checkpoints_df.head(LIMIT_CHECKPOINTS).copy()
 
+    # Build target dataset universe from known scanners + datasets seen in checkpoints.
+    source_components: set[str] = set()
+    for source_dataset in checkpoints_df["dataset"].astype(str).unique().tolist():
+        source_components.update(_source_components(source_dataset))
+    allowed_targets = set(DEFAULT_TARGET_DATASETS)
+    target_dataset_order = [
+        ds
+        for ds in dict.fromkeys(list(DEFAULT_TARGET_DATASETS) + sorted(source_components))
+        if ds in allowed_targets
+    ]
+
     # Scan all target datasets once.
     dataset_frames: dict[str, pd.DataFrame] = {}
     data_root = DATA_ROOT.resolve()
-    for ds in ALL_DATASETS:
+    for ds in target_dataset_order:
         root = _resolve_dataset_root(data_root, ds)
         if not root.exists():
             raise FileNotFoundError(f"Dataset root not found for {ds}: {root}")
@@ -235,8 +270,10 @@ def main() -> None:
         source_fold = int(ck["fold"])
         best_epoch = int(ck["best_epoch"])
 
+        source_components = _source_components(source_dataset)
+        source_stats_dataset = _stats_dataset_for_source(source_dataset)
         ckpt_path = _checkpoint_path_for_cfg(bundle_dir, cfg_id)
-        _, eval_tf = make_tf_from_stats_for_fold(source_dataset, source_fold, STATS_PATH.resolve())
+        _, eval_tf = make_tf_from_stats_for_fold(source_stats_dataset, source_fold, STATS_PATH.resolve())
 
         model_obj = _build_model_for_checkpoint(
             origin=source_origin,
@@ -244,9 +281,9 @@ def main() -> None:
             device=device,
         )
 
-        target_datasets = list(ALL_DATASETS)
+        target_datasets = list(target_dataset_order)
         if not INCLUDE_SAME_DATASET:
-            target_datasets = [d for d in target_datasets if d != source_dataset]
+            target_datasets = [d for d in target_datasets if d not in source_components]
 
         print(
             f"[{i+1}/{total}] source={source_dataset}/{source_model}/fold{source_fold} "
@@ -269,6 +306,9 @@ def main() -> None:
             rec_test = {
                 "cfg_id": cfg_id,
                 "source_dataset": source_dataset,
+                "source_dataset_regime": dataset_regime(source_dataset),
+                "source_dataset_components": ",".join(source_components),
+                "source_stats_dataset": source_stats_dataset,
                 "source_model": source_model,
                 "source_origin": source_origin,
                 "source_fold": source_fold,
@@ -296,6 +336,9 @@ def main() -> None:
                 rec_full = {
                     "cfg_id": cfg_id,
                     "source_dataset": source_dataset,
+                    "source_dataset_regime": dataset_regime(source_dataset),
+                    "source_dataset_components": ",".join(source_components),
+                    "source_stats_dataset": source_stats_dataset,
                     "source_model": source_model,
                     "source_origin": source_origin,
                     "source_fold": source_fold,
