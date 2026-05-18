@@ -40,10 +40,42 @@ ensure_bundle() {
   echo "[INFO] Prepared bundle at: $BUNDLE_DIR"
 }
 
-run() {
+resolve_script_path() {
   local script_path="$1"
+  case "$script_path" in
+    evaluate/*|plots/*|tables/*|generalizability/*|statistics/*)
+      printf '%s' "$script_path"
+      ;;
+    evaluate_bundle_checkpoints_on_testsets.py) printf '%s' "evaluate/evaluate_bundle_checkpoints_on_testsets.py" ;;
+    profile_checkpoint_efficiency.py) printf '%s' "evaluate/profile_checkpoint_efficiency.py" ;;
+    evaluate_cross_dataset_checkpoints.py) printf '%s' "evaluate/evaluate_cross_dataset_checkpoints.py" ;;
+    build_generalization_master_table.py) printf '%s' "generalizability/build_generalization_master_table.py" ;;
+    plot_transfer_heatmaps_by_regime.py) printf '%s' "generalizability/plot_transfer_heatmaps_by_regime.py" ;;
+    plot_generalization_gap_and_robustness.py) printf '%s' "generalizability/plot_generalization_gap_and_robustness.py" ;;
+    plot_efficiency_vs_generalization.py) printf '%s' "generalizability/plot_efficiency_vs_generalization.py" ;;
+    generate_generalizability_summary_table.py) printf '%s' "generalizability/generate_generalizability_summary_table.py" ;;
+    test_rq1_statistical_analysis.py) printf '%s' "statistics/test_rq1_statistical_analysis.py" ;;
+    test_rq2_statistical_analysis.py) printf '%s' "statistics/test_rq2_statistical_analysis.py" ;;
+    test_rq3_statistical_analysis.py) printf '%s' "statistics/test_rq3_statistical_analysis.py" ;;
+    test_rq4_statistical_analysis.py) printf '%s' "statistics/test_rq4_statistical_analysis.py" ;;
+    test_rq5_statistical_analysis.py) printf '%s' "statistics/test_rq5_statistical_analysis.py" ;;
+    generate_*)
+      printf 'tables/%s' "$script_path"
+      ;;
+    plot_*|print_*)
+      printf 'plots/%s' "$script_path"
+      ;;
+    *)
+      printf '%s' "$script_path"
+      ;;
+  esac
+}
+
+run() {
+  local script_path
+  script_path="$(resolve_script_path "$1")"
   if [[ -n "$START_FROM" && "$HAS_STARTED" -eq 0 ]]; then
-    if [[ "$script_path" != "$START_FROM" ]]; then
+    if [[ "$script_path" != "$(resolve_script_path "$START_FROM")" ]]; then
       echo "[SKIP] $script_path"
       return
     fi
@@ -59,45 +91,45 @@ run() {
 ensure_bundle
 
 # Core producers first (generate shared CSV artifacts).
-run "evaluate_bundle_checkpoints_on_testsets.py"
-run "profile_checkpoint_efficiency.py"
-run "evaluate_cross_dataset_checkpoints.py"
+run "evaluate/evaluate_bundle_checkpoints_on_testsets.py"
+run "evaluate/profile_checkpoint_efficiency.py"
+run "evaluate/evaluate_cross_dataset_checkpoints.py"
 
 # Downstream analysis/plots.
-run "plot_cross_dataset_performance.py"
-run "plot_metrics_loss_curves.py"
-run "plot_aggregated_loss_curves.py"
-run "plot_efficiency_vs_performance.py"
-run "plot_pareto_front.py"
-run "plot_macro_f1_vs_latency.py"
-run "plot_f1_vs_domain_shift.py"
-run "plot_test_performance_boxplots.py"
-run "print_top_models_by_dataset.py"
-run "plot_dataset_sample_panels.py"
-run "plot_transform_probe_grid.py"
+run "plots/plot_cross_dataset_performance.py"
+run "plots/plot_metrics_loss_curves.py"
+run "plots/plot_aggregated_loss_curves.py"
+run "plots/plot_efficiency_vs_performance.py"
+run "plots/plot_pareto_front.py"
+run "plots/plot_macro_f1_vs_latency.py"
+run "plots/plot_f1_vs_domain_shift.py"
+run "plots/plot_test_performance_boxplots.py"
+run "plots/print_top_models_by_dataset.py"
+run "plots/plot_dataset_sample_panels.py"
+run "plots/plot_transform_probe_grid.py"
 
 # Tables / manuscript helpers.
-run "generate_test_results_tex_table.py"
-run "generate_efficiency_summary_tex_table.py"
-run "generate_training_hparams_tex_table.py"
-run "generate_inference_efficiency_hparams_tex_table.py"
-run "generate_dataset_split_summary_tex_table.py"
-run "generate_binary_label_mapping_tex_table.py"
-run "generate_augmentations_tex_table.py"
+run "tables/generate_test_results_tex_table.py"
+run "tables/generate_efficiency_summary_tex_table.py"
+run "tables/generate_training_hparams_tex_table.py"
+run "tables/generate_inference_efficiency_hparams_tex_table.py"
+run "tables/generate_dataset_split_summary_tex_table.py"
+run "tables/generate_binary_label_mapping_tex_table.py"
+run "tables/generate_augmentations_tex_table.py"
 
 # Generalizability suite
-run "build_generalization_master_table.py"
-run "plot_transfer_heatmaps_by_regime.py"
-run "plot_generalization_gap_and_robustness.py"
-run "plot_efficiency_vs_generalization.py"
-run "generate_generalizability_summary_table.py"
+run "generalizability/build_generalization_master_table.py"
+run "generalizability/plot_transfer_heatmaps_by_regime.py"
+run "generalizability/plot_generalization_gap_and_robustness.py"
+run "generalizability/plot_efficiency_vs_generalization.py"
+run "generalizability/generate_generalizability_summary_table.py"
 
 # Research-question statistical analyses (outputs under workspace/statistical_results/RQ*)
-run "test_rq1_statistical_analysis.py"
-run "test_rq2_statistical_analysis.py"
-run "test_rq3_statistical_analysis.py"
-run "test_rq4_statistical_analysis.py"
-run "test_rq5_statistical_analysis.py"
+run "statistics/test_rq1_statistical_analysis.py"
+run "statistics/test_rq2_statistical_analysis.py"
+run "statistics/test_rq3_statistical_analysis.py"
+run "statistics/test_rq4_statistical_analysis.py"
+run "statistics/test_rq5_statistical_analysis.py"
 
 if [[ -n "$START_FROM" && "$HAS_STARTED" -eq 0 ]]; then
   echo "[ERROR] START_FROM script not found in pipeline: $START_FROM"
