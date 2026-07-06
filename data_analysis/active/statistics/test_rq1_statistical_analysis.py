@@ -30,6 +30,15 @@ Outputs (workspace/statistical_results/RQ1):
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,10 +47,6 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from data_analysis.active.lib.statistical_helpers import (
     apply_filters,
@@ -219,24 +224,39 @@ def plot_forest(summary: pd.DataFrame, out_path: Path) -> None:
     if summary.empty:
         return
     df = summary.sort_values("mean_diff", ascending=True).reset_index(drop=True)
-    fig_h = max(4.0, 0.3 * len(df) + 1.5)
-    fig, ax = plt.subplots(figsize=(7.4, fig_h), constrained_layout=True)
+    # Single-column layout (~3.4 in / 86 mm wide); height scales with model count.
+    fig_w = 3.4
+    row_h = 0.24
+    fig_h = max(3.6, row_h * len(df) + 0.85)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
     y = np.arange(len(df))
     means = df["mean_diff"].to_numpy(dtype=float)
     lo = df["ci_low"].to_numpy(dtype=float)
     hi = df["ci_high"].to_numpy(dtype=float)
     err = np.vstack([means - lo, hi - means])
-    colors = ["#1b7a3e" if a else "#a8a8a8" for a in df["accept_per_model"]]
-    ax.errorbar(means, y, xerr=err, fmt="o", ecolor="0.55", elinewidth=1.0,
-                capsize=3, mfc="white", mec="black", lw=1.0, zorder=3)
-    ax.scatter(means, y, c=colors, s=38, zorder=4, edgecolor="black", linewidths=0.5)
-    ax.axvline(0.0, linestyle="--", color="0.55", linewidth=1.0)
+    ax.errorbar(
+        means,
+        y,
+        xerr=err,
+        fmt="o",
+        ecolor="0.55",
+        elinewidth=0.9,
+        capsize=2.5,
+        markersize=4.5,
+        mfc="black",
+        mec="black",
+        color="black",
+        lw=0.9,
+        zorder=3,
+    )
+    ax.axvline(0.0, linestyle="--", color="0.55", linewidth=0.9)
     ax.set_yticks(y)
-    ax.set_yticklabels(df["source_model"].astype(str).tolist(), fontsize=8)
-    ax.set_xlabel("Mean (in-domain F1 - mean OOD F1)")
-    ax.set_title("RQ1 forest plot: per-model in-domain vs OOD difference")
+    ax.set_yticklabels(df["source_model"].astype(str).tolist(), fontsize=7)
+    ax.set_xlabel("Mean F1 gap (in-domain \u2212 out-of-domain)", fontsize=8)
+    ax.set_title("Per-architecture in-domain minus out-of-domain F1 gap", fontsize=8, pad=6)
+    ax.tick_params(axis="x", labelsize=7)
     ax.grid(axis="x", linestyle="--", alpha=0.3)
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pandas as pd
-
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+import pandas as pd
+
 
 
 MASTER_CSV = Path("workspace/analysis/generalizability/generalization_master.csv")
@@ -46,6 +48,10 @@ def _format_float(value: float, digits: int = 3) -> str:
     return f"{float(value):.{digits}f}"
 
 
+def _format_pm(mean: float, std: float, digits: int = 3) -> str:
+    return f"${_format_float(mean, digits)} \\pm {_format_float(std, digits)}$"
+
+
 def _is_in_domain_series(df: pd.DataFrame) -> pd.Series:
     if "is_in_domain_target" in df.columns:
         series = df["is_in_domain_target"]
@@ -78,6 +84,8 @@ def _checkpoint_rollup(ood_df: pd.DataFrame) -> pd.DataFrame:
             worst_target_f1=("target_f1", "min"),
             in_domain_f1=("in_domain_f1_mean", "mean"),
             latency_ms=("latency_mean_ms", "mean"),
+            memory_peak_mb=("memory_peak_mb", "mean"),
+            flops_count_mean=("flops_count_mean", "mean"),
             n_ood_targets=("target_dataset", "nunique"),
         )
     )
@@ -148,6 +156,7 @@ def _build_regime_comparison(ckpt_df: pd.DataFrame) -> pd.DataFrame:
             in_domain_f1=("in_domain_f1", "mean"),
             generalization_gap_f1=("generalization_gap_f1", "mean"),
             latency_ms=("latency_ms", "mean"),
+            memory_peak_mb=("memory_peak_mb", "mean"),
             n_checkpoints=("cfg_id", "nunique"),
         )
     )
@@ -174,15 +183,22 @@ def _build_legacy_summary(ckpt_df: pd.DataFrame) -> pd.DataFrame:
         ckpt_df.groupby(["source_dataset_regime", "source_model"], as_index=False)
         .agg(
             in_domain_macro_f1=("in_domain_f1", "mean"),
+            in_domain_macro_f1_std=("in_domain_f1", "std"),
             cross_domain_macro_f1=("mean_ood_f1", "mean"),
+            cross_domain_macro_f1_std=("mean_ood_f1", "std"),
             gap_f1=("generalization_gap_f1", "mean"),
             worst_target_f1=("worst_target_f1", "mean"),
             latency_ms=("latency_ms", "mean"),
+            flops_g=("flops_count_mean", lambda s: float(s.mean()) / 1e9),
+            memory_peak_mb=("memory_peak_mb", "mean"),
+            memory_peak_mb_std=("memory_peak_mb", "std"),
             n_checkpoints=("cfg_id", "nunique"),
         )
         .sort_values(["source_dataset_regime", "cross_domain_macro_f1"], ascending=[True, False])
         .reset_index(drop=True)
     )
+    for c in ("in_domain_macro_f1_std", "cross_domain_macro_f1_std", "memory_peak_mb_std"):
+        out[c] = out[c].fillna(0.0)
     return out
 
 
@@ -302,13 +318,13 @@ def _to_tex_legacy(df: pd.DataFrame) -> str:
     lines = [
         r"\begin{table*}[!tbph]",
         r"  \centering",
-        r"  \caption{Generalizability summary by model and training regime.}",
+        r"  \caption{Generalizability summary by model and training regime. In-domain F1, cross-domain F1, and peak memory are reported as mean $\pm$ std across checkpoints (matched model and regime). FLOPs are per forward pass in GFLOPs ($10^9$).}",
         r"  \label{tab:generalizability_summary}",
         r"  \scriptsize",
         r"  \setlength{\tabcolsep}{3pt}",
-        r"  \begin{tabular}{llccccc}",
+        r"  \begin{tabular}{llccccccc}",
         r"    \hline",
-        r"    \textbf{Regime} & \textbf{Model} & \textbf{In-domain F1} & \textbf{Cross-domain F1} & \textbf{Gap F1} & \textbf{Worst-target F1} & \textbf{Latency (ms)} \\",
+        r"    \textbf{Regime} & \textbf{Model} & \textbf{In-domain F1} & \textbf{Cross-domain F1} & \textbf{Gap F1} & \textbf{Worst-target F1} & \textbf{Latency (ms)} & \textbf{FLOPs (G)} & \textbf{Peak Mem (MB)} \\",
         r"    \hline",
     ]
     for _, r in df.iterrows():
@@ -316,11 +332,13 @@ def _to_tex_legacy(df: pd.DataFrame) -> str:
             "    "
             + f"{_tex_escape(r['source_dataset_regime'])} & "
             + f"{_tex_escape(r['source_model'])} & "
-            + f"${_format_float(r['in_domain_macro_f1'])}$ & "
-            + f"${_format_float(r['cross_domain_macro_f1'])}$ & "
+            + f"{_format_pm(r['in_domain_macro_f1'], r['in_domain_macro_f1_std'])} & "
+            + f"{_format_pm(r['cross_domain_macro_f1'], r['cross_domain_macro_f1_std'])} & "
             + f"${_format_float(r['gap_f1'])}$ & "
             + f"${_format_float(r['worst_target_f1'])}$ & "
-            + f"${_format_float(r['latency_ms'], 2)}$ \\\\"
+            + f"${_format_float(r['latency_ms'], 2)}$ & "
+            + f"${_format_float(r['flops_g'], 3)}$ & "
+            + f"{_format_pm(r['memory_peak_mb'], r['memory_peak_mb_std'], 2)} \\\\"
         )
     lines.extend([r"    \hline", r"  \end{tabular}", r"\end{table*}"])
     return "\n".join(lines) + "\n"
@@ -343,13 +361,21 @@ def main() -> None:
         "target_dataset",
         "target_f1",
         "latency_mean_ms",
+        "memory_peak_mb",
+        "flops_count_mean",
         "is_in_domain_target",
         "source_dataset_components",
     }
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"Master CSV missing required columns: {missing}")
-    for c in ("in_domain_f1_mean", "target_f1", "latency_mean_ms"):
+    for c in (
+        "in_domain_f1_mean",
+        "target_f1",
+        "latency_mean_ms",
+        "memory_peak_mb",
+        "flops_count_mean",
+    ):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["in_domain_f1_mean", "target_f1"]).copy()
 

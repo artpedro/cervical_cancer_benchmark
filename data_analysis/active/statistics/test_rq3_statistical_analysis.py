@@ -20,7 +20,7 @@ Outputs (workspace/statistical_results/RQ3):
 - ols_coefficients.csv
 - family_stratified_effects.csv
 - mean_by_regime_family.csv
-- forest_plot_rq3.png
+- interaction_plot_rq3.png
 
 Edit constants at the top to filter models, regimes, or source/target datasets.
 """
@@ -30,15 +30,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from data_analysis.active.lib.statistical_helpers import (
     apply_filters,
@@ -76,6 +78,13 @@ TARGET_DATASETS_EXCLUDE: tuple[str, ...] = ()
 # Number of permutations for the interaction test.
 N_PERMUTATIONS: int = 5000
 PERMUTATION_SEED: int = 42
+N_BOOTSTRAP_MEAN: int = 10_000
+
+# Plot order and display labels.
+REGIME_ORDER: tuple[str, ...] = ("solo", "mixed")
+REGIME_LABELS: dict[str, str] = {"solo": "Solo", "mixed": "Mixed"}
+FAMILY_ORDER: tuple[str, ...] = ("cnn", "transformer")
+FAMILY_LABELS: dict[str, str] = {"cnn": "CNN", "transformer": "Transformer-based"}
 
 # Acceptance criteria for H3_1 (from research_questions_and_hypotheses.md).
 ALPHA: float = 0.05
@@ -216,41 +225,89 @@ def family_stratified_effects(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def regime_family_means(df: pd.DataFrame) -> pd.DataFrame:
-    means = (
-        df.groupby(["family", "source_dataset_regime"], as_index=False)
-        .agg(
-            mean_f1=("target_f1", "mean"),
-            std_f1=("target_f1", "std"),
-            n_obs=("target_f1", "count"),
-        )
-        .sort_values(["family", "source_dataset_regime"])
-        .reset_index(drop=True)
-    )
-    return means
+    rows: list[dict[str, object]] = []
+    for family in FAMILY_ORDER:
+        for regime in REGIME_ORDER:
+            sub = df[
+                (df["family"].astype(str) == family)
+                & (df["source_dataset_regime"].astype(str) == regime)
+            ]
+            if sub.empty:
+                continue
+            vals = sub["target_f1"].to_numpy(dtype=float)
+            ci_lo, ci_hi = bootstrap_ci_mean(
+                vals, n_boot=N_BOOTSTRAP_MEAN, seed=PERMUTATION_SEED
+            )
+            rows.append(
+                {
+                    "family": family,
+                    "family_label": FAMILY_LABELS.get(family, family),
+                    "source_dataset_regime": regime,
+                    "regime_label": REGIME_LABELS.get(regime, regime),
+                    "mean_f1": float(np.mean(vals)),
+                    "ci_low": ci_lo,
+                    "ci_high": ci_hi,
+                    "std_f1": float(np.std(vals, ddof=1)) if vals.size > 1 else float("nan"),
+                    "n_obs": int(vals.size),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
-def plot_family_regime(means: pd.DataFrame, out_path: Path) -> None:
+def plot_regime_family_interaction(means: pd.DataFrame, out_path: Path) -> None:
+    """Interaction plot: regime on x-axis, mean OOD F1 on y, one line per family."""
     if means.empty:
         return
-    families = sorted(means["family"].astype(str).unique())
-    regimes = ["solo", "mixed"]
-    fig, ax = plt.subplots(figsize=(6.5, 4.2), constrained_layout=True)
-    width = 0.36
-    x = np.arange(len(families))
-    palette = {"solo": "#3a76af", "mixed": "#c44e52"}
-    for i, regime in enumerate(regimes):
-        vals = []
-        for fam in families:
-            row = means[(means["family"] == fam) & (means["source_dataset_regime"] == regime)]
-            vals.append(float(row["mean_f1"].iloc[0]) if not row.empty else float("nan"))
-        ax.bar(x + (i - 0.5) * width, vals, width, label=regime, color=palette.get(regime))
+
+    fig_w, fig_h = 3.4, 2.75
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    x = np.arange(len(REGIME_ORDER))
+    family_styles = {
+        "cnn": {"color": "black", "marker": "o", "linestyle": "-"},
+        "transformer": {"color": "0.35", "marker": "s", "linestyle": "--"},
+    }
+
+    for family in FAMILY_ORDER:
+        sub = means[means["family"].astype(str) == family].set_index("source_dataset_regime")
+        if sub.empty:
+            continue
+        y = np.array([float(sub.loc[r, "mean_f1"]) for r in REGIME_ORDER])
+        lo = np.array([float(sub.loc[r, "ci_low"]) for r in REGIME_ORDER])
+        hi = np.array([float(sub.loc[r, "ci_high"]) for r in REGIME_ORDER])
+        yerr = np.vstack([y - lo, hi - y])
+        style = family_styles.get(family, {"color": "black", "marker": "o", "linestyle": "-"})
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            fmt=f"{style['marker']}{style['linestyle']}",
+            color=style["color"],
+            ecolor=style["color"],
+            elinewidth=0.85,
+            capsize=3.0,
+            markersize=5.0,
+            mfc=style["color"],
+            mec=style["color"],
+            lw=1.0,
+            label=FAMILY_LABELS.get(family, family),
+            zorder=3,
+        )
+
     ax.set_xticks(x)
-    ax.set_xticklabels(families)
-    ax.set_ylabel("Mean OOD F1")
-    ax.set_title("RQ3: Mean OOD F1 by family and regime")
+    ax.set_xticklabels([REGIME_LABELS[r] for r in REGIME_ORDER], fontsize=7)
+    ax.set_ylabel("Mean OOD F1", fontsize=7)
+    ax.tick_params(axis="y", labelsize=6.5)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.legend(title="regime")
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    ax.legend(title="Architecture family", fontsize=6.5, title_fontsize=6.5, loc="best")
+    fig.tight_layout()
+    top = ax.get_position()
+    fig.suptitle(
+        "Mean out-of-domain F1 by architecture family and training regime",
+        fontsize=7.5,
+        y=top.y1 + 0.06,
+        va="bottom",
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
 
@@ -296,8 +353,8 @@ def write_summary(path: Path, *, ols_table: pd.DataFrame, observed: float,
     lines.append("\n## Outputs\n")
     lines.append("- `ols_coefficients.csv`: OLS estimates with cluster-robust SE.")
     lines.append("- `family_stratified_effects.csv`: Cohen's d and Mann-Whitney per family.")
-    lines.append("- `mean_by_regime_family.csv`: cell means used for the bar plot.")
-    lines.append("- `forest_plot_rq3.png`: bar plot of regime-by-family means.")
+    lines.append("- `mean_by_regime_family.csv`: cell means and 95% bootstrap CIs.")
+    lines.append("- `interaction_plot_rq3.png`: regime x family interaction plot.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -323,7 +380,7 @@ def main() -> None:
     means = regime_family_means(df)
     means.to_csv(out_dir / "mean_by_regime_family.csv", index=False)
 
-    plot_family_regime(means, out_dir / "forest_plot_rq3.png")
+    plot_regime_family_interaction(means, out_dir / "interaction_plot_rq3.png")
 
     interaction_row = ols_table[ols_table["term"] == "regime_mixed:family_transformer"].iloc[0]
     p_value = float(interaction_row["p_two_sided"])

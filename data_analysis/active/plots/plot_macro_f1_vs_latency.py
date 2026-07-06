@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 """
 Per-model macro F1 over the three in-dataset test benchmarks, vs mean latency.
 
@@ -28,10 +37,6 @@ the axes (requires the adjusttext package).
 import sys
 from pathlib import Path
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker

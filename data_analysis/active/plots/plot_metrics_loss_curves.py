@@ -13,10 +13,6 @@ Validation split is the CV fold holdout (logged as "val" in pipeline); shown as
 import sys
 from pathlib import Path
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np

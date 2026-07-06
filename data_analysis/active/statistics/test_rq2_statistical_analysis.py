@@ -30,12 +30,21 @@ Outputs (workspace/statistical_results/RQ2):
 - per_model_target_results.csv
 - per_model_decisions.csv
 - by_target.csv
-- forest_plot_rq2.png
+- forest_plot_rq2.png (main: pooled effect by held-out target)
+- forest_plot_rq2_supplement.png (per-model detail)
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,11 +53,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+from data_analysis.active.lib.dataset_regime_utils import DATASET_DISPLAY
 from data_analysis.active.lib.statistical_helpers import (
     apply_filters,
     bh_fdr,
@@ -93,6 +98,9 @@ BOOTSTRAP_SEED: int = 42
 
 MASTER_CSV = Path("workspace/analysis/generalizability/generalization_master.csv")
 OUT_DIR = Path("workspace/statistical_results/RQ2")
+
+# Panel order for target-faceted main figure (Herlev, Riva, SIPaKMeD).
+TARGET_PANEL_ORDER: tuple[str, ...] = ("herlev", "riva", "sipakmed")
 
 
 @dataclass
@@ -256,7 +264,113 @@ def per_model_decision(cells: pd.DataFrame) -> pd.DataFrame:
     return decisions.sort_values("mean_diff_overall", ascending=False).reset_index(drop=True)
 
 
-def plot_forest(cells: pd.DataFrame, out_path: Path) -> None:
+def by_target_pooled_results(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Pooled mixed-minus-best-solo effect per held-out target with bootstrap CIs."""
+    rows: list[dict[str, object]] = []
+    for target in TARGET_PANEL_ORDER:
+        sub = pairs[pairs["target_dataset"].astype(str) == target]
+        if sub.empty:
+            continue
+        diffs = sub["diff_mixed_minus_solo"].to_numpy(dtype=float)
+        s = summarize_diffs(diffs)
+        rows.append(
+            {
+                "target_dataset": target,
+                "target_label": DATASET_DISPLAY.get(target, target),
+                "n_pairs": s.n,
+                "mean_diff": s.mean,
+                "median_diff": s.median,
+                "ci_low": s.ci_low,
+                "ci_high": s.ci_high,
+                "cohens_d": s.cohens_d,
+                "wilcoxon_stat": s.wilcoxon_stat,
+                "p_value_one_sided": s.pvalue,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def plot_target_pooled_forest(by_target: pd.DataFrame, out_path: Path) -> None:
+    """Three vertically stacked panels with a shared x-axis (one pooled effect per target)."""
+    if by_target.empty:
+        return
+
+    n_panels = len(TARGET_PANEL_ORDER)
+    fig_w = 3.4
+    row_h = 0.92
+    # Height for panels + x-label only; title is placed after layout (no reserved band).
+    fig_h = row_h * n_panels + 0.55
+    xlim = (-0.3, 0.3)
+    title = (
+        "Target-wise mixed-source versus best solo-source\n"
+        "out-of-domain F1 differences"
+    )
+
+    fig, axes = plt.subplots(
+        n_panels,
+        1,
+        figsize=(fig_w, fig_h),
+        sharex=True,
+    )
+    if n_panels == 1:
+        axes = [axes]
+
+    for ax, target in zip(axes, TARGET_PANEL_ORDER, strict=True):
+        row = by_target[by_target["target_dataset"].astype(str) == target]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        mean = float(row["mean_diff"])
+        lo = float(row["ci_low"])
+        hi = float(row["ci_high"])
+        err = np.array([[mean - lo], [hi - mean]])
+        ax.errorbar(
+            mean,
+            0.0,
+            xerr=err,
+            fmt="o",
+            ecolor="0.55",
+            elinewidth=0.85,
+            capsize=2.0,
+            markersize=4.5,
+            mfc="black",
+            mec="black",
+            color="black",
+            lw=0.85,
+            zorder=3,
+        )
+        ax.axvline(0.0, linestyle="--", color="0.55", linewidth=0.85, zorder=1)
+        ax.set_yticks([])
+        ax.set_ylabel(
+            str(row["target_label"]),
+            fontsize=7,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=2,
+        )
+        ax.label_outer()
+        ax.grid(axis="x", linestyle="--", alpha=0.3)
+        ax.set_xlim(xlim)
+        ax.set_ylim(-0.55, 0.55)
+        ax.tick_params(axis="x", labelsize=6.5)
+
+    axes[-1].set_xlabel("Mean F1 difference (mixed \u2212 best solo)", fontsize=7)
+    fig.tight_layout(h_pad=0.45)
+    top = axes[0].get_position()
+    fig.suptitle(
+        title,
+        fontsize=7.5,
+        y=top.y1 + 0.018,
+        va="bottom",
+        linespacing=1.05,
+    )
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
+    plt.close(fig)
+
+
+def plot_forest_supplement(cells: pd.DataFrame, out_path: Path) -> None:
+    """Per-(model, target) forest plot for supplementary material."""
     if cells.empty:
         return
     targets = sorted(cells["target_dataset"].astype(str).unique())
@@ -282,17 +396,27 @@ def plot_forest(cells: pd.DataFrame, out_path: Path) -> None:
         lo = sub["ci_low"].to_numpy(dtype=float)
         hi = sub["ci_high"].to_numpy(dtype=float)
         err = np.vstack([means - lo, hi - means])
-        ax.errorbar(means, y, xerr=err, fmt="o", ecolor="0.6", elinewidth=0.9,
-                    capsize=2, mfc=palette.get(tgt, "#888"), mec="black",
-                    mew=0.4, label=tgt, lw=1.0)
+        ax.errorbar(
+            means,
+            y,
+            xerr=err,
+            fmt="o",
+            ecolor="0.6",
+            elinewidth=0.9,
+            capsize=2,
+            mfc=palette.get(tgt, "#888"),
+            mec="black",
+            mew=0.4,
+            label=DATASET_DISPLAY.get(tgt, tgt),
+            lw=1.0,
+        )
     ax.axvline(0.0, linestyle="--", color="0.55", linewidth=1.0)
     ax.set_yticks(np.arange(len(order)))
     ax.set_yticklabels(order, fontsize=8)
-    ax.set_xlabel("Mean (mixed F1 - best-solo F1) on held-out target")
-    ax.set_title("RQ2 forest plot: per-model mixed vs best-solo OOD F1")
-    ax.legend(title="target", fontsize=7, loc="best")
+    ax.set_xlabel("Mean F1 difference (mixed \u2212 best solo) on held-out target")
+    ax.legend(title="Held-out target", fontsize=7, loc="best")
     ax.grid(axis="x", linestyle="--", alpha=0.3)
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -366,7 +490,8 @@ def write_summary(path: Path, *, decisions: pd.DataFrame, cells: pd.DataFrame,
     lines.append("- `per_model_target_results.csv`: per-(model, target) test statistics.")
     lines.append("- `per_model_decisions.csv`: per-model accept/reject decisions.")
     lines.append("- `by_target.csv`: pooled differences split by held-out target.")
-    lines.append("- `forest_plot_rq2.png`: forest plot of per-(model, target) effects.")
+    lines.append("- `forest_plot_rq2.png`: main figure with pooled effect per held-out target.")
+    lines.append("- `forest_plot_rq2_supplement.png`: per-(model, target) forest plot.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -395,17 +520,11 @@ def main() -> None:
     decisions = per_model_decision(cells)
     decisions.to_csv(out_dir / "per_model_decisions.csv", index=False)
 
-    by_target = (
-        pairs.groupby("target_dataset", as_index=False)
-        .agg(
-            mean_diff=("diff_mixed_minus_solo", "mean"),
-            median_diff=("diff_mixed_minus_solo", "median"),
-            n_pairs=("diff_mixed_minus_solo", "count"),
-        )
-    )
+    by_target = by_target_pooled_results(pairs)
     by_target.to_csv(out_dir / "by_target.csv", index=False)
 
-    plot_forest(cells, out_dir / "forest_plot_rq2.png")
+    plot_target_pooled_forest(by_target, out_dir / "forest_plot_rq2.png")
+    plot_forest_supplement(cells, out_dir / "forest_plot_rq2_supplement.png")
 
     n_models = len(decisions)
     fraction = (int(decisions["accept_per_model"].sum()) / n_models) if n_models else 0.0

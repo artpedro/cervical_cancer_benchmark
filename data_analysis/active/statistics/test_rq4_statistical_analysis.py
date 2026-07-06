@@ -11,13 +11,14 @@ Analyses produced:
    FID across source components for mixed regimes; configurable below).
 2. Spearman correlation overall and stratified by training regime and
    architecture family, with bootstrap 95% CIs.
-3. Scatter plot with per-regime trend lines.
+3. Two-panel distribution plot (solo vs mixed) of OOD F1 across FID levels.
 
 Outputs (workspace/statistical_results/RQ4):
 - decision_summary.md
 - per_observation_fid_f1.csv
 - correlation_results.csv
-- scatter_fid_vs_f1.png
+- mean_f1_by_regime_fid_level.csv
+- distribution_fid_vs_f1.png
 
 Edit constants at the top to filter models, regimes, source/target datasets,
 or FID aggregation rules.
@@ -28,18 +29,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from data_analysis.active.lib.statistical_helpers import (
     apply_filters,
+    bootstrap_ci_mean,
     bootstrap_ci_paired_statistic,
     describe_filters,
     df_to_markdown,
@@ -76,6 +80,16 @@ BOOTSTRAP_SEED: int = 42
 MASTER_CSV = Path("workspace/analysis/generalizability/generalization_master.csv")
 PAIRWISE_FID_CSV = Path("workspace/analysis/domain_shift/pairwise_fid.csv")
 OUT_DIR = Path("workspace/statistical_results/RQ4")
+
+# Canonical pairwise FID values (low -> high) used to bin observations.
+FID_CANONICAL: tuple[tuple[str, float], ...] = (
+    ("low", 139.71573805959324),
+    ("medium", 176.90400837001258),
+    ("high", 209.64797687866402),
+)
+FID_LEVEL_ORDER: tuple[str, ...] = tuple(k for k, _ in FID_CANONICAL)
+FID_LEVEL_LABELS: dict[str, str] = {"low": "Low", "medium": "Medium", "high": "High"}
+REGIME_PANELS: tuple[tuple[str, str], ...] = (("solo", "(a) Solo"), ("mixed", "(b) Mixed"))
 
 
 def load_pairwise_fid() -> dict[tuple[str, str], float]:
@@ -139,7 +153,42 @@ def load_data() -> pd.DataFrame:
         fid_values.append(aggregate_fid(components, str(r["target_dataset"]), fid))
     df["fid_to_target"] = fid_values
     df = df.dropna(subset=["fid_to_target"]).copy()
+    df["fid_level"] = _assign_fid_level(df["fid_to_target"].to_numpy(dtype=float))
     return df
+
+
+def _assign_fid_level(values: np.ndarray) -> list[str]:
+    canonical = np.array([v for _, v in FID_CANONICAL], dtype=float)
+    keys = [k for k, _ in FID_CANONICAL]
+    idx = np.argmin(np.abs(values[:, None] - canonical[None, :]), axis=1)
+    return [keys[i] for i in idx]
+
+
+def mean_f1_by_regime_fid_level(df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for regime, _panel in REGIME_PANELS:
+        for level, fid_val in FID_CANONICAL:
+            sub = df[
+                (df["source_dataset_regime"].astype(str) == regime)
+                & (df["fid_level"].astype(str) == level)
+            ]
+            if sub.empty:
+                continue
+            vals = sub["target_f1"].to_numpy(dtype=float)
+            ci_lo, ci_hi = bootstrap_ci_mean(vals, n_boot=N_BOOTSTRAP, seed=BOOTSTRAP_SEED)
+            rows.append(
+                {
+                    "source_dataset_regime": regime,
+                    "fid_level": level,
+                    "fid_level_label": FID_LEVEL_LABELS[level],
+                    "fid_canonical": fid_val,
+                    "mean_f1": float(np.mean(vals)),
+                    "ci_low": ci_lo,
+                    "ci_high": ci_hi,
+                    "n_obs": int(vals.size),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def spearman_with_ci(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
@@ -181,26 +230,102 @@ def stratified_correlations(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_scatter(df: pd.DataFrame, out_path: Path) -> None:
+def plot_fid_distribution_panels(
+    df: pd.DataFrame,
+    corr_table: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    """Two-panel boxplot of OOD F1 by canonical FID level, stratified by training regime."""
     if df.empty:
         return
-    fig, ax = plt.subplots(figsize=(7.0, 4.8), constrained_layout=True)
-    palette = {"solo": "#3a76af", "mixed": "#c44e52"}
-    for regime, sub in df.groupby("source_dataset_regime", sort=True):
-        color = palette.get(regime, "#777")
-        x = sub["fid_to_target"].to_numpy(dtype=float)
-        y = sub["target_f1"].to_numpy(dtype=float)
-        ax.scatter(x, y, s=18, alpha=0.45, color=color, label=regime, edgecolor="white", linewidth=0.4)
-        if x.size >= 2:
-            slope, intercept = np.polyfit(x, y, deg=1)
-            xs = np.linspace(x.min(), x.max(), 50)
-            ax.plot(xs, slope * xs + intercept, color=color, linewidth=1.4, alpha=0.85)
-    ax.set_xlabel(f"FID(source, target) - aggregation: {FID_AGGREGATION_FOR_MIXED}")
-    ax.set_ylabel("OOD F1")
-    ax.set_title("RQ4: FID vs OOD F1")
-    ax.grid(linestyle="--", alpha=0.3)
-    ax.legend(title="regime")
-    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+
+    fig_h = 2.35 * len(REGIME_PANELS) + 0.5
+    fig, axes = plt.subplots(len(REGIME_PANELS), 1, figsize=(3.4, fig_h), sharey=True)
+    if len(REGIME_PANELS) == 1:
+        axes = [axes]
+
+    x = np.arange(len(FID_LEVEL_ORDER))
+    for ax, (regime, panel_label) in zip(axes, REGIME_PANELS, strict=True):
+        sub = df[df["source_dataset_regime"].astype(str) == regime]
+        box_data: list[np.ndarray] = []
+        means: list[float] = []
+        yerr_lo: list[float] = []
+        yerr_hi: list[float] = []
+        for level in FID_LEVEL_ORDER:
+            vals = sub.loc[sub["fid_level"].astype(str) == level, "target_f1"].to_numpy(dtype=float)
+            box_data.append(vals)
+            if vals.size:
+                m = float(np.mean(vals))
+                lo, hi = bootstrap_ci_mean(vals, n_boot=N_BOOTSTRAP, seed=BOOTSTRAP_SEED)
+                means.append(m)
+                yerr_lo.append(m - lo)
+                yerr_hi.append(hi - m)
+            else:
+                means.append(float("nan"))
+                yerr_lo.append(float("nan"))
+                yerr_hi.append(float("nan"))
+
+        bp = ax.boxplot(
+            box_data,
+            positions=x,
+            widths=0.5,
+            patch_artist=True,
+            showfliers=False,
+            medianprops={"color": "black", "linewidth": 1.0},
+            boxprops={"facecolor": "0.92", "edgecolor": "black", "linewidth": 0.8},
+            whiskerprops={"color": "0.45", "linewidth": 0.8},
+            capprops={"color": "0.45", "linewidth": 0.8},
+        )
+        _ = bp  # silence linter
+        valid_x = [i for i, m in enumerate(means) if not np.isnan(m)]
+        if valid_x:
+            vx = np.array(valid_x, dtype=float)
+            vm = np.array([means[i] for i in valid_x], dtype=float)
+            vlo = np.array([yerr_lo[i] for i in valid_x], dtype=float)
+            vhi = np.array([yerr_hi[i] for i in valid_x], dtype=float)
+            ax.errorbar(
+                vx,
+                vm,
+                yerr=np.vstack([vlo, vhi]),
+                fmt="D",
+                color="black",
+                ecolor="black",
+                elinewidth=0.85,
+                capsize=2.5,
+                markersize=4.0,
+                zorder=4,
+            )
+
+        rho_row = corr_table[corr_table["stratum"].astype(str) == f"regime={regime}"]
+        if not rho_row.empty:
+            rho = float(rho_row.iloc[0]["rho"])
+            ax.text(
+                0.98,
+                0.97,
+                f"$\\rho = {rho:.3f}$",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=7,
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([FID_LEVEL_LABELS[lvl] for lvl in FID_LEVEL_ORDER], fontsize=7)
+        ax.set_title(panel_label, fontsize=8, loc="left", pad=4)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        ax.tick_params(axis="y", labelsize=6.5)
+
+    axes[0].set_ylabel("OOD F1", fontsize=7)
+    fig.tight_layout(h_pad=0.65)
+    top = axes[0].get_position()
+    fig.suptitle(
+        "Out-of-domain F1 by domain-shift (FID) level and training regime",
+        fontsize=7.5,
+        y=top.y1 + 0.045,
+        va="bottom",
+    )
+    axes[-1].set_xlabel("Domain-shift level (FID)", fontsize=7)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
 
@@ -242,7 +367,8 @@ def write_summary(path: Path, *, table: pd.DataFrame, decision: bool,
     lines.append("\n## Outputs\n")
     lines.append("- `per_observation_fid_f1.csv`: per-row FID and OOD F1.")
     lines.append("- `correlation_results.csv`: stratified Spearman with CIs.")
-    lines.append("- `scatter_fid_vs_f1.png`: regime-faceted scatter with trend lines.")
+    lines.append("- `mean_f1_by_regime_fid_level.csv`: cell means and 95% bootstrap CIs.")
+    lines.append("- `distribution_fid_vs_f1.png`: two-panel FID-level distribution plot.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -253,15 +379,27 @@ def main() -> None:
     df = load_data()
     if df.empty:
         raise RuntimeError("No FID-mapped data after filtering.")
-    cols_to_save = ["source_dataset", "source_dataset_regime", "source_dataset_components",
-                    "source_model", "family", "source_fold", "target_dataset",
-                    "fid_to_target", "target_f1"]
+    cols_to_save = [
+        "source_dataset",
+        "source_dataset_regime",
+        "source_dataset_components",
+        "source_model",
+        "family",
+        "source_fold",
+        "target_dataset",
+        "fid_to_target",
+        "fid_level",
+        "target_f1",
+    ]
     df[cols_to_save].to_csv(out_dir / "per_observation_fid_f1.csv", index=False)
 
     table = stratified_correlations(df)
     table.to_csv(out_dir / "correlation_results.csv", index=False)
 
-    plot_scatter(df, out_dir / "scatter_fid_vs_f1.png")
+    cell_means = mean_f1_by_regime_fid_level(df)
+    cell_means.to_csv(out_dir / "mean_f1_by_regime_fid_level.csv", index=False)
+
+    plot_fid_distribution_panels(df, table, out_dir / "distribution_fid_vs_f1.png")
 
     overall = table[table["stratum"] == "overall"].iloc[0]
     decision = (

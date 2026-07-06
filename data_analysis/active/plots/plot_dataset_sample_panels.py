@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
+_REPO_ROOT = next(
+    p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+)
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -31,7 +32,7 @@ from datasets.datasets import (
 DATA_ROOT = Path("datasets/data")
 OUT_DIR = Path("workspace/analysis/sample_visualization")
 
-SEED = 42
+SEED = 64
 NUM_FOLDS = 5
 TEST_SIZE = 0.2
 SPLIT = "train_dev"  # "test" or "train_dev"
@@ -61,17 +62,31 @@ TRANSFORM_RNG_SEED_BASE = 12345
 DENORMALIZE_FOR_DISPLAY = True
 
 DPI = 300
-RC_ACADEMIC: dict = {
+# Manuscript single-column width (matches efficiency / RQ figures).
+SINGLE_COL_W = 3.54
+# Base sizes at SINGLE_COL_W; scaled up for wider multi-panel sample grids.
+FONT_SUPTITLE_BASE = 9.5
+FONT_HEADER_BASE = 9.0
+FONT_SCALE_EXPONENT = 0.72
+
+RC_ARTICLE: dict = {
     "font.family": "serif",
     "font.serif": ["Times New Roman", "DejaVu Serif", "Liberation Serif", "serif"],
     "mathtext.fontset": "dejavuserif",
-    "font.size": 10,
-    "axes.titlesize": 11,
-    "axes.labelsize": 10,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
-    "axes.linewidth": 0.5,
+    "font.size": 8,
+    "axes.titlesize": 8,
+    "axes.labelsize": 7,
+    "xtick.labelsize": 6.5,
+    "ytick.labelsize": 6.5,
+    "axes.linewidth": 0.6,
 }
+
+
+def _font_sizes(fig_width_in: float) -> tuple[float, float]:
+    """Scale title/header pt sizes with figure width (sub-linear vs single column)."""
+    scale = max(fig_width_in / SINGLE_COL_W, 1.0)
+    factor = scale**FONT_SCALE_EXPONENT
+    return FONT_SUPTITLE_BASE * factor, FONT_HEADER_BASE * factor
 
 
 def _resolve_dataset_root(data_root: Path, dataset: str) -> Path:
@@ -184,21 +199,25 @@ def _plot_panel(
         for k in range(counts_by_class[cls]):
             col_keys.append((cls, k))
 
-    with plt.rc_context(RC_ACADEMIC):
+    fig_w = 2.15 * n_cols
+    fig_h = 2.45 * n_ds + 0.8
+    font_suptitle, font_header = _font_sizes(fig_w)
+
+    with plt.rc_context(RC_ARTICLE):
         # Build explicit rows: class-header row + [dataset-title, image-row] x dataset
-        fig_raw = plt.figure(figsize=(2.15 * n_cols, 2.45 * n_ds + 0.8), constrained_layout=False)
-        fig_tf = plt.figure(figsize=(2.15 * n_cols, 2.45 * n_ds + 0.8), constrained_layout=False)
+        fig_raw = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
+        fig_tf = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
         gs_raw = fig_raw.add_gridspec(
             nrows=1 + n_ds * 2,
             ncols=n_cols,
-            height_ratios=[0.16] + [0.14 if i % 2 == 0 else 1.0 for i in range(n_ds * 2)],
+            height_ratios=[0.18] + [0.16 if i % 2 == 0 else 1.0 for i in range(n_ds * 2)],
             hspace=0.14,
             wspace=0.04,
         )
         gs_tf = fig_tf.add_gridspec(
             nrows=1 + n_ds * 2,
             ncols=n_cols,
-            height_ratios=[0.16] + [0.14 if i % 2 == 0 else 1.0 for i in range(n_ds * 2)],
+            height_ratios=[0.18] + [0.16 if i % 2 == 0 else 1.0 for i in range(n_ds * 2)],
             hspace=0.14,
             wspace=0.04,
         )
@@ -218,7 +237,7 @@ def _plot_panel(
             (ax_cls_tf_a, "Class: Abnormal"),
         ):
             ax.axis("off")
-            ax.text(0.5, 0.5, txt, ha="center", va="center", fontsize=13, color="0.12", fontweight="bold")
+            ax.text(0.5, 0.5, txt, ha="center", va="center", fontsize=font_header, color="0.12")
 
         for r, ds in enumerate(DATASET_ORDER):
             title_row = 1 + 2 * r
@@ -238,9 +257,8 @@ def _plot_panel(
                     ttl,
                     ha="center",
                     va="center",
-                    fontsize=13,
+                    fontsize=font_header,
                     color="0.12",
-                    fontweight="bold",
                 )
 
             tf_ds = tf_by_ds[ds]
@@ -268,7 +286,7 @@ def _plot_panel(
         fig_raw.subplots_adjust(left=0.02, right=0.98, bottom=0.03, top=0.93)
         fig_tf.subplots_adjust(left=0.02, right=0.98, bottom=0.03, top=0.93)
 
-        fig_raw.suptitle("Raw image samples by class", fontsize=16, color="0.05", y=0.97, fontweight="bold")
+        fig_raw.suptitle("Raw image samples by class", fontsize=font_suptitle, color="0.05", y=0.97)
         tf_note = "denormalized display" if DENORMALIZE_FOR_DISPLAY else "normalized tensor (clipped)"
         if TRANSFORM_MODE == "train":
             tf_caption = (
@@ -276,7 +294,7 @@ def _plot_panel(
             )
         else:
             tf_caption = f"Model input after evaluation transform ({tf_note})"
-        fig_tf.suptitle(tf_caption, fontsize=16, color="0.05", y=0.97, fontweight="bold")
+        fig_tf.suptitle(tf_caption, fontsize=font_suptitle, color="0.05", y=0.97)
 
         OUT_DIR.resolve().mkdir(parents=True, exist_ok=True)
         out_raw = OUT_DIR / "raw_samples_grid.png"

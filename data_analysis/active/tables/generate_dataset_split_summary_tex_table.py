@@ -3,10 +3,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from data_analysis.active._repo_root import REPO_ROOT as _REPO_ROOT
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 import pandas as pd
 
