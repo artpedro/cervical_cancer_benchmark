@@ -71,7 +71,7 @@ CODE_FILES = ["train_v2.py", "train_all_configs.py", "train_models.py", "model_l
               "uv.lock", "datasets/datasets.py", "datasets/protocol_v2.py", "datasets/protocol_inputs/riva_slide_fold_assignment_5fold.csv",
               "training/pipeline.py", "training/engine.py", "training/export.py", "training/io_utils.py", "training/ledger.py",
               "training/eta.py", "data_analysis/active/lib/results_v2.py"]
-GIT_GUARD_PATHS = CODE_FILES + ["datasets/partitions_v3_5fold", "datasets/partitions_v2", "training"]
+GIT_GUARD_PATHS = CODE_FILES + ["datasets/partitions_v3_5fold", "training"]   # superseded v2 partitions are not training inputs
 
 
 # ---------------------------------------------------------------------------------------------------------------------
