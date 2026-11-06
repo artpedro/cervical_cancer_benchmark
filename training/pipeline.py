@@ -6,7 +6,7 @@ import json
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import pandas as pd
 import torch
@@ -23,7 +23,7 @@ from datasets.datasets import (
 from model_loader import load_any
 from training.engine import compute_class_weights, run_epoch
 from training.eta import ModelETATracker
-from training.io_utils import append_csv_rows, setup_fold_dir, write_json
+from training.io_utils import append_csv_rows, atomic_torch_save, setup_fold_dir, write_json
 
 
 def scan_dataset(name: str, root: Path, scanner: Callable, *, num_folds: int, seed: int) -> pd.DataFrame:
@@ -47,6 +47,10 @@ def train_dataset_v2(
     use_amp: bool,
     results_csv: Path | None = None,
     progress_cb: Optional[Callable[..., None]] = None,
+    export_cb: Optional[Callable[..., None]] = None,
+    fit_guard: Optional[Callable[..., bool]] = None,
+    done_cb: Optional[Callable[..., None]] = None,
+    folds: Optional[Sequence[int]] = None,
     print_every_epoch: int = 1,
 ) -> None:
     assert balance_mode == "weighted_loss"
@@ -140,12 +144,15 @@ def train_dataset_v2(
             epochs_per_fold=cfg.epochs,
         )
 
-        for fold in range(num_folds):
+        for fold in (range(num_folds) if folds is None else folds):
             fold_dir = setup_fold_dir(run_dir, friendly_name, fold)
             fold_epoch_file = fold_dir / "epoch_metrics.csv"
             fold_best_json = fold_dir / "best_metrics.json"
             fold_last_json = fold_dir / "last_epoch_metrics.json"
             best_ckpt_path = fold_dir / "checkpoints" / "best.pt"
+            if callable(fit_guard) and not fit_guard(name=name, cfg=cfg, fold=fold, fold_dir=fold_dir, best_ckpt_path=best_ckpt_path,
+                                                     run_dir=run_dir, epoch_file=epoch_file, summary_file=summary_file):
+                continue   # already completed and verified (or skipped for this session)
 
             config_start_dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             config_t0 = time.time()
@@ -278,7 +285,7 @@ def train_dataset_v2(
                 if val_m["acc"] > best_val["acc"]:
                     best_val.update(val_m)
                     best_val["epoch"] = epoch
-                    torch.save(
+                    atomic_torch_save(
                         {
                             "epoch": epoch,
                             "model_state": model.state_dict(),
@@ -378,6 +385,12 @@ def train_dataset_v2(
                     run_dir=str(run_dir),
                 )
 
+            if callable(export_cb):  # protocol v2: per-image prediction export from the best checkpoint
+                export_cb(fold=fold, best_ckpt_path=best_ckpt_path, cfg=cfg, display_name=friendly_name,
+                          backbone_id=backbone_id, origin=origin)
+            if callable(done_cb):  # called only after checkpoint + export are on disk
+                done_cb(name=name, cfg=cfg, fold=fold, fold_dir=fold_dir, best_ckpt_path=best_ckpt_path)
+
             del model, optimiser, scheduler, train_loader, val_loader, scaler
             torch.cuda.empty_cache()
             gc.collect()
@@ -401,6 +414,11 @@ def train_mixed_dataset_v2(
     use_amp: bool,
     results_csv: Path | None = None,
     progress_cb: Optional[Callable[..., None]] = None,
+    export_cb: Optional[Callable[..., None]] = None,
+    fit_guard: Optional[Callable[..., bool]] = None,
+    done_cb: Optional[Callable[..., None]] = None,
+    folds: Optional[Sequence[int]] = None,
+    pooled_norm_key: Optional[str] = None,
     print_every_epoch: int = 1,
 ) -> None:
     """
@@ -510,17 +528,21 @@ def train_mixed_dataset_v2(
             epochs_per_fold=cfg.epochs,
         )
 
-        for fold in range(num_folds):
+        for fold in (range(num_folds) if folds is None else folds):
             fold_dir = setup_fold_dir(run_dir, friendly_name, fold)
             fold_epoch_file = fold_dir / "epoch_metrics.csv"
             fold_best_json = fold_dir / "best_metrics.json"
             fold_last_json = fold_dir / "last_epoch_metrics.json"
             best_ckpt_path = fold_dir / "checkpoints" / "best.pt"
+            if callable(fit_guard) and not fit_guard(name=name, cfg=cfg, fold=fold, fold_dir=fold_dir, best_ckpt_path=best_ckpt_path,
+                                                     run_dir=run_dir, epoch_file=epoch_file, summary_file=summary_file):
+                continue   # already completed and verified (or skipped for this session)
 
             train_tf_by_source: dict[str, Any] = {}
             eval_tf_by_source: dict[str, Any] = {}
             for ds_key in source_names:
-                t_tr, t_ev = make_tf_from_stats_for_fold(ds_key, fold, stats_path)
+                # pooled_norm_key: ONE pooled training-only mean/std for every image of the mixed run (both sources, val, test)
+                t_tr, t_ev = make_tf_from_stats_for_fold(pooled_norm_key or ds_key, fold, stats_path)
                 train_tf_by_source[ds_key] = t_tr
                 eval_tf_by_source[ds_key] = t_ev
 
@@ -653,7 +675,7 @@ def train_mixed_dataset_v2(
                 if val_m["acc"] > best_val["acc"]:
                     best_val.update(val_m)
                     best_val["epoch"] = epoch
-                    torch.save(
+                    atomic_torch_save(
                         {
                             "epoch": epoch,
                             "model_state": model.state_dict(),
@@ -827,6 +849,12 @@ def train_mixed_dataset_v2(
                     config_seconds=config_seconds,
                     run_dir=str(run_dir),
                 )
+
+            if callable(export_cb):  # protocol v2: per-image prediction export from the best checkpoint
+                export_cb(fold=fold, best_ckpt_path=best_ckpt_path, cfg=cfg, display_name=friendly_name,
+                          backbone_id=backbone_id, origin=origin)
+            if callable(done_cb):  # called only after checkpoint + export are on disk
+                done_cb(name=name, cfg=cfg, fold=fold, fold_dir=fold_dir, best_ckpt_path=best_ckpt_path)
 
             del model, optimiser, scheduler, train_loader, val_loader, scaler
             torch.cuda.empty_cache()

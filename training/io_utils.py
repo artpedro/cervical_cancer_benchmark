@@ -77,3 +77,13 @@ def tee_log(log_path: Path):
     sys.stderr = _Tee(old_stderr, log_f, isatty_stream=old_stderr)
     return log_f, old_stdout, old_stderr
 
+
+
+def atomic_torch_save(obj, path: Path) -> None:
+    """torch.save to a temporary file in the same directory, fsync, then atomic rename (a crash never leaves a partial best.pt)."""
+    import torch
+    path = Path(path); tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        torch.save(obj, f)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)

@@ -67,8 +67,7 @@ def make_tf(
         [[meanR, meanG, meanB], [stdR, stdG, stdB]].
         If None, falls back to IMAGENET_MEAN/STD.
     dataset_name : str or None
-        If ``"riva"``, ``train_tf`` omits the leading ``Resize(224)`` so training
-        runs rotation and center-crop at native scale; ``eval_tf`` is unchanged.
+        Kept for API compatibility; no longer changes the transforms (protocol v2).
 
     Returns
     -------
@@ -80,9 +79,9 @@ def make_tf(
     else:
         mean, std = normalizing_matriz
 
-    train_steps: List = []
-    if dataset_name != "riva":
-        train_steps.append(T.Resize(224))
+    # Protocol v2: the deterministic spatial step is Resize(224)+CenterCrop(224) for training AND evaluation, for every
+    # dataset (v1 skipped Resize(224) for RIVA at train time, so train/eval scales differed by 224/256).
+    train_steps: List = [T.Resize(224)]
     train_steps.extend(
         [
             T.RandomRotation(
