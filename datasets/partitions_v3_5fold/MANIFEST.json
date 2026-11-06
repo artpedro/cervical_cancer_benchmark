@@ -1,0 +1,31 @@
+{
+  "protocol": "protocol_v3_5fold",
+  "num_folds": 5,
+  "cv_seed_herlev_sipakmed": 42,
+  "riva_fold_source": "datasets/protocol_inputs/riva_slide_fold_assignment_5fold.csv",
+  "riva_assignment_sha256": "f2cb00a87df7800e74318b2a5887b1b051f440ae162971554998ae9ed2816aaa",
+  "superseded": [
+    "datasets/partitions_v2"
+  ],
+  "holdout_seed": 42,
+  "test_size": 0.2,
+  "sklearn": "1.7.0",
+  "python": "3.13.11",
+  "files": {
+    "herlev_partition.csv": "57d61016bfb50dff2f7f89b3a5618972646c635ac049c9a6c943ce6f04a9fdd2",
+    "normalization_stats_v3.json": "21993d7f25dc1becde6735865f3dac8099c322b77de590c86d2a1596c21a1feb",
+    "riva_partition.csv": "b11e3a0b5a1da1a986683e73d68aa0b1fd58e70bf574d67ee71739fb4aa34e10",
+    "sipakmed_partition.csv": "4529f4400e17ed45a24b07b636ea10fc8da6d5a62b1150f16cab9f692be35216"
+  },
+  "normalization": {
+    "solo": "the source's own fold-k training statistics for all images of the run",
+    "mixed": "pooled fold-k training statistics of the two sources (training rows only) for ALL images of the run, including validation, holdout and unseen-target images"
+  },
+  "revision_history": [
+    {
+      "change": "added pooled mixed-run normalization entries (5 mixed runs x 5 folds); per-source entries unchanged",
+      "previous_stats_sha256": "ae0a23de692919cde9fe72f45bd929f65a24d891f533d71157e4bf7d9cc9fded",
+      "previous_manifest_copy": "audit/pre_retraining/final_verification/superseded_stats/"
+    }
+  ]
+}

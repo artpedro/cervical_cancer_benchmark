@@ -1,0 +1,14 @@
+{
+  "num_folds": 3,
+  "cv_seed": 4,
+  "holdout_seed": 42,
+  "test_size": 0.2,
+  "sklearn": "1.7.0",
+  "python": "3.13.11",
+  "files": {
+    "herlev_partition_v2.csv": "f7fb4e732c613380f1c0a84cb1779649cb0ff7818e7d4ab01deb0d69b5c8fdec",
+    "normalization_stats_v2.json": "c62113944a2a48ae5888d2007ab28d5e94dd9400bf51cb199ae2962c93d54157",
+    "riva_partition_v2.csv": "1d13fd933b10bd9a9cd64721137926d92fbe4b7517a4798a240226b8553426e8",
+    "sipakmed_partition_v2.csv": "11fe6f915de2e2aeba79dbefd4cd70e6de02ea09c6029d572fc569c5e732deaf"
+  }
+}
